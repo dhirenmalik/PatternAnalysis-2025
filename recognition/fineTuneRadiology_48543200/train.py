@@ -82,7 +82,7 @@ def main():
         per_device_eval_batch_size=args.batch_size,
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
