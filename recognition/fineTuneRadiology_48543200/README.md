@@ -2,7 +2,7 @@
 
 **Student ID:** 38543200  
 **Branch:** topic-recognition  
-**Folder:** `recognition/fineTuneRadiology_38543200`
+**Folder:** `recognition/fineTuneRadiology_48543200`
 
 ## Problem
 Translate expert radiology reports into layperson summaries using the BioLaySumm 2025 open-source track.
