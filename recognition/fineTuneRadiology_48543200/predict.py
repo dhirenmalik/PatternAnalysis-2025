@@ -74,14 +74,16 @@ def main():
     subset = raw["validation"].select(range(min(args.rouge_samples, len(raw["validation"]))))
     preds, refs = [], []
 
-    for batch in subset:
-        text_in = args.add_prefix + batch[in_col]
+    for i in range(len(subset)):
+        example = subset[i]
+        text_in = args.add_prefix + example[in_col]
         inputs = tokenizer(text_in, return_tensors="pt", truncation=True,
-                           padding=True, max_length=args.max_input_len).to(device)
+                           padding=True, max_length=args.max_input_len).to(
+            device)
         with torch.no_grad():
             output = model.generate(**inputs, max_length=args.max_target_len)
         preds.append(tokenizer.decode(output[0], skip_special_tokens=True))
-        refs.append(batch[tgt_col])
+        refs.append(example[tgt_col])
 
     results = rouge.compute(predictions=preds, references=refs, use_stemmer=True)
     results = {k: round(v, 4) for k, v in results.items()}
