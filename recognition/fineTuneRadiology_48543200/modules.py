@@ -25,6 +25,9 @@ def load_model_and_tokenizer(cfg: Optional[ModelConfig] = None):
     cfg = cfg or ModelConfig()
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
+
+    # IMPORTANT: Load model on CPU first, then apply LoRA, THEN move to device
+    # This prevents device-related issues with PEFT
     model = AutoModelForSeq2SeqLM.from_pretrained(cfg.model_name)
 
     if cfg.use_lora:
@@ -38,8 +41,18 @@ def load_model_and_tokenizer(cfg: Optional[ModelConfig] = None):
         )
         model = get_peft_model(model, lora_cfg)
 
-    # Colab convenience: put model on GPU if available
+        # Print trainable parameters for verification
+        print("=" * 50)
+        model.print_trainable_parameters()
+        print("=" * 50)
+
+    # NOTE: We don't move model to device here anymore!
+    # The Trainer will handle device placement correctly.
+    # Moving it here can cause issues with mixed precision and gradient computation.
+
+    # If you really need to know the device, detect it but don't move:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    print(f"🖥️  Detected device: {device}")
+    print("📍 Model will be moved to device by Trainer")
 
     return model, tokenizer, cfg

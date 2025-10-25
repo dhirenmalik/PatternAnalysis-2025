@@ -1,5 +1,5 @@
 # train.py
-# COMP3710 Task 13 (Radiology → Lay Summary)  [Hard Difficulty] :contentReference[oaicite:2]{index=2}
+# COMP3710 Task 13 (Radiology → Lay Summary)
 # Student ID: 48543200
 
 import argparse
@@ -13,8 +13,8 @@ from transformers import (
 )
 import evaluate
 
-from modules import load_model_and_tokenizer, ModelConfig  # loads flan-t5-base + LoRA if enabled :contentReference[oaicite:3]{index=3}
-from dataset import load_biolaysumm, build_tokenized        # loads BioLaySumm + tokenizes seq2seq pairs :contentReference[oaicite:4]{index=4}
+from modules import load_model_and_tokenizer, ModelConfig
+from dataset import load_biolaysumm, build_tokenized
 
 
 def parse_args():
@@ -35,17 +35,17 @@ def parse_args():
     p.add_argument("--warmup_ratio", type=float, default=0.03)
     p.add_argument("--seed", type=int, default=42)
 
-    # NEW args for fast Colab debugging / not burning 5h every run
+    # NEW args for fast Colab debugging
     p.add_argument("--subset", type=int, default=None,
                    help="If set, use only this many samples from train and ~10% of that for val.")
     p.add_argument("--fp16", action="store_true",
-                   help="Force fp16 mixed precision. By default we already auto-enable if CUDA is available.")
+                   help="Force fp16 mixed precision.")
     p.add_argument("--checkpointing", action="store_true",
-                   help="Enable gradient checkpointing on the model to save VRAM.")
+                   help="Enable gradient checkpointing (only works without LoRA).")
     p.add_argument("--eval_epoch", action="store_true",
-                   help="Evaluate only at end of each epoch instead of every N steps.")
+                   help="Evaluate only at end of each epoch.")
     p.add_argument("--save_epoch", action="store_true",
-                   help="Save only at end of each epoch instead of every N steps.")
+                   help="Save only at end of each epoch.")
 
     return p.parse_args()
 
@@ -58,20 +58,26 @@ def main():
     # -----------------------------
     # 1) Model + tokenizer
     # -----------------------------
-    cfg = ModelConfig(model_name=args.model_name, use_lora=args.use_lora)  # LoRA = parameter-efficient fine-tuning :contentReference[oaicite:5]{index=5}
+    cfg = ModelConfig(model_name=args.model_name, use_lora=args.use_lora)
     model, tokenizer, _ = load_model_and_tokenizer(cfg)
 
-    # optional gradient checkpointing for speed/VRAM tradeoff
+    # FIXED: Only enable gradient checkpointing if NOT using LoRA
     if args.checkpointing:
-        print("🔁 Enabling gradient checkpointing")
-        model.gradient_checkpointing_enable()
+        if args.use_lora:
+            print(
+                "⚠️  WARNING: Gradient checkpointing is incompatible with LoRA.")
+            print("    Disabling checkpointing to avoid training errors.")
+            print(
+                "    To save VRAM: reduce batch_size or max_input_len instead.")
+        else:
+            print("🔁 Enabling gradient checkpointing")
+            model.gradient_checkpointing_enable()
 
     # -----------------------------
     # 2) Data
     # -----------------------------
-    raw = load_biolaysumm()  # returns DatasetDict with train/validation/test for BioLaySumm radiology→layman task :contentReference[oaicite:6]{index=6}
+    raw = load_biolaysumm()
 
-    # Build tokenized splits for seq2seq (adds "summarize radiology: " prefix, pads/truncates, etc.) :contentReference[oaicite:7]{index=7}
     tokenized, input_col, target_col = build_tokenized(
         raw,
         tokenizer,
@@ -79,8 +85,7 @@ def main():
         max_target_len=args.max_target_len,
     )
 
-    # OPTIONAL SUBSET for fast iteration:
-    # We'll slice DOWN the already-tokenized datasets. This is what prevents 5h runs.
+    # OPTIONAL SUBSET for fast iteration
     if args.subset is not None:
         n_train = min(args.subset, len(tokenized["train"]))
         n_val = max(1, args.subset // 10)
@@ -100,44 +105,44 @@ def main():
     # -----------------------------
     # 3) Metrics (ROUGE-1/2/L/Lsum)
     # -----------------------------
-    rouge = evaluate.load("rouge")  # required by spec: evaluate with ROUGE on held-out split :contentReference[oaicite:8]{index=8}
+    rouge = evaluate.load("rouge")
 
     def compute_metrics(eval_pred):
         preds, labels = eval_pred
-        # HuggingFace sometimes returns (logits, ...) tuple for preds, we want just token IDs
         if isinstance(preds, tuple):
             preds = preds[0]
 
-        # Decode predictions
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
 
-        # Replace -100 in labels so we can decode them
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        decoded_labels = tokenizer.batch_decode(labels,
+                                                skip_special_tokens=True)
 
         results = rouge.compute(
             predictions=decoded_preds,
             references=decoded_labels,
             use_stemmer=True,
         )
-        # Also track generated length
-        gen_lens = [np.count_nonzero(p != tokenizer.pad_token_id) for p in preds]
+        gen_lens = [np.count_nonzero(p != tokenizer.pad_token_id) for p in
+                    preds]
         results["gen_len"] = float(np.mean(gen_lens))
-        # Round for nicer printing
         return {k: round(v, 4) for k, v in results.items()}
 
     # -----------------------------
     # 4) Trainer / TrainingArguments
     # -----------------------------
 
-    # pick eval/save strategy
     eval_strategy = "epoch" if args.eval_epoch else "steps"
     save_strategy = "epoch" if args.save_epoch else "steps"
 
-    # fp16 logic:
-    # - If user passed --fp16, force it.
-    # - Else, default to True if CUDA available.
     use_fp16 = args.fp16 or torch.cuda.is_available()
+
+    # Debug: Print dataset sizes
+    print(f"📊 Training samples: {len(tokenized_train)}")
+    print(f"📊 Validation samples: {len(tokenized_val)}")
+    print(f"📊 Steps per epoch: {len(tokenized_train) // args.batch_size}")
+    print(
+        f"📊 Total training steps: {(len(tokenized_train) // args.batch_size) * args.epochs}")
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
@@ -197,7 +202,6 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "RESULTS.txt"), "w") as f:
-        # this file is gold for your README and pull request (marks require summary/results) :contentReference[oaicite:9]{index=9}
         for k, v in eval_metrics.items():
             f.write(f"{k}: {v}\n")
 
