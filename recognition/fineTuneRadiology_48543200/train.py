@@ -10,7 +10,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -22,6 +22,17 @@ import evaluate
 
 from dataset import RadiologyDataset
 from modules import ModelConfig, load_model_and_tokenizer, print_model_info
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # type: ignore
+
+    HAS_MPL = True
+except ImportError:  # pragma: no cover - optional dependency
+    HAS_MPL = False
+    plt = None  # type: ignore
 
 
 rouge_metric = evaluate.load("rouge")
@@ -642,6 +653,54 @@ def save_training_artifacts(
     print(f"📊 Training artefacts saved to {output_dir}")
 
 
+def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
+    """Persist loss and ROUGE curves for quick visual inspection."""
+    if not HAS_MPL:
+        print("⚠️  Matplotlib not available — skipping training plots.")
+        return
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Loss curves
+    loss_path = output_dir / "loss_curve.png"
+    if results.get("train_losses"):
+        epochs = range(1, len(results["train_losses"]) + 1)
+        plt.figure(figsize=(8, 5))
+        plt.plot(epochs, results["train_losses"], label="Train Loss", marker="o")
+        if results.get("val_losses"):
+            plt.plot(epochs, results["val_losses"], label="Validation Loss", marker="o")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training vs Validation Loss")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(loss_path)
+        plt.close()
+        print(f"📉 Saved loss curve to {loss_path}")
+
+    # ROUGE curves
+    rouge_scores = results.get("rouge_scores") or []
+    if rouge_scores:
+        rouge_keys = sorted(rouge_scores[0].keys())
+        rouge_path = output_dir / "rouge_curves.png"
+        plt.figure(figsize=(8, 5))
+        for key in rouge_keys:
+            values = [score.get(key) for score in rouge_scores]
+            plt.plot(range(1, len(values) + 1), values, label=key.upper(), marker="o")
+        plt.xlabel("Evaluation Step")
+        plt.ylabel("ROUGE Score")
+        plt.title("ROUGE Metrics Over Time")
+        plt.ylim(0, 1)
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(rouge_path)
+        plt.close()
+        print(f"📈 Saved ROUGE curves to {rouge_path}")
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing & main entry
 # ---------------------------------------------------------------------------
@@ -883,6 +942,7 @@ def main():
 
     results = trainer.train(num_epochs=args.epochs)
     save_training_artifacts(Path(args.output_dir), args, hardware, results, model)
+    save_training_plots(Path(args.output_dir), results)
 
     print("\n✅ Training complete! Check the output directory for artefacts and checkpoints.")
 
