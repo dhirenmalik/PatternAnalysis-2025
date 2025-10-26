@@ -1,13 +1,36 @@
 """Dataset utilities for the manual BioLaySumm training workflow."""
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
 from datasets import DatasetDict, load_dataset
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerBase
+
+# Column name candidates seen across BioLaySumm variants.
+CANDIDATE_INPUT_KEYS: Tuple[str, ...] = (
+    "radiology_report",
+    "expert_report",
+    "report",
+    "source",
+)
+CANDIDATE_TARGET_KEYS: Tuple[str, ...] = (
+    "layman_report",
+    "lay_summary",
+    "summary",
+    "target",
+)
+
+
+def _guess_column(names: Sequence[str], candidates: Sequence[str]) -> str:
+    """Pick the first matching column regardless of letter casing."""
+    names_lower = [col.lower() for col in names]
+    for candidate in candidates:
+        if candidate.lower() in names_lower:
+            return names[names_lower.index(candidate.lower())]
+    return names[0]
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +66,35 @@ def build_tokenized(
     target_col: Optional[str] = None,
     add_prefix: str = "summarize radiology: ",
 ) -> Tuple[DatasetDict, str, str]:
+    """Tokenise splits using Hugging Face's mapping helpers."""
+    sample = raw["train"].features
+    cols = list(sample.keys())
+    input_col = input_col or _guess_column(cols, CANDIDATE_INPUT_KEYS)
+    target_col = target_col or _guess_column(cols, CANDIDATE_TARGET_KEYS)
+
+    print(f"🔍 Using columns: input='{input_col}' | target='{target_col}'")
+
+    def preprocess(batch):
+        sources = [add_prefix + s for s in batch[input_col]]
+        model_inputs = tokenizer(
+            sources,
+            max_length=max_input_len,
+            truncation=True,
+            padding="max_length",
+        )
+        labels = tokenizer(
+            batch[target_col],
+            max_length=max_target_len,
+            truncation=True,
+            padding="max_length",
+        )
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    tokenized = raw.map(preprocess, batched=True, remove_columns=cols)
+    return tokenized, input_col, target_col
+
+
 class RadiologyDataset(Dataset):
     """PyTorch dataset for radiology report → lay summary generation.
 
