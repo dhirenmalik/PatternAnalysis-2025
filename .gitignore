@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+recognition/fineTuneRadiology_48543200/data/
+.idea/
