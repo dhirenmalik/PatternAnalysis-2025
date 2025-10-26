@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -243,7 +242,11 @@ class ManualTrainer:
         self.optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
 
         self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
-        self.scaler = GradScaler() if self.use_mixed_precision else None
+        self.scaler = (
+            torch.amp.GradScaler(device_type=device.type)
+            if self.use_mixed_precision
+            else None
+        )
 
         self.global_step = 0
         self.best_val_loss = float("inf")
@@ -333,8 +336,12 @@ class ManualTrainer:
         attention_mask = batch["attention_mask"].to(self.device)
         labels = batch["labels"].to(self.device)
 
-        context = autocast if self.use_mixed_precision else nullcontext
-        with context():
+        autocast_ctx = (
+            torch.amp.autocast(device_type=self.device.type)
+            if self.use_mixed_precision
+            else nullcontext()
+        )
+        with autocast_ctx:
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -351,11 +358,11 @@ class ManualTrainer:
 
     def _optimizer_step(self) -> None:
         """Apply accumulated gradients and advance the optimiser state."""
-        if self.use_mixed_precision:
+        if self.use_mixed_precision and self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
-        if self.use_mixed_precision:
+        if self.use_mixed_precision and self.scaler is not None:
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
@@ -382,13 +389,17 @@ class ManualTrainer:
             attention_mask = batch["attention_mask"].to(self.device)
             labels = batch["labels"].to(self.device)
 
-            context = autocast if self.use_mixed_precision else nullcontext
-            with context():
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
+        autocast_ctx = (
+            torch.amp.autocast(device_type=self.device.type)
+            if self.use_mixed_precision
+            else nullcontext()
+        )
+        with autocast_ctx:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
             total_loss += outputs.loss.item()
 
             generated = self.model.generate(
