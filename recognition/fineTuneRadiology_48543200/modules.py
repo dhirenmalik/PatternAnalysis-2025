@@ -1,8 +1,4 @@
-"""Model utilities shared by Trainer and manual training workflows.
-
-Exposes helpers for loading FLAN-T5 models, attaching LoRA adapters, and
-retrieving quick parameter statistics. All docstrings follow the Google style.
-"""
+"""Model utilities for the custom FLAN-T5 + LoRA training workflow."""
 
 from __future__ import annotations
 
@@ -115,7 +111,7 @@ def build_model(
         model = model.to(device)
         print("🚀 Model moved to GPU for manual training loop.")
     else:
-        print("📍 Model left on CPU — Trainer / loop should handle device placement.")
+        print("📍 Model left on CPU — training script will handle device placement.")
 
     return model
 

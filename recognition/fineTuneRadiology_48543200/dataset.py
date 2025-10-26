@@ -1,60 +1,16 @@
-"""Dataset utilities shared by Trainer and manual training workflows.
-
-This module provides helpers for loading and tokenising the BioLaySumm dataset
-when using Hugging Face's Trainer as well as PyTorch dataset/dataloader classes
-tailored for custom training loops.
-"""
+"""Dataset utilities for the manual BioLaySumm training workflow."""
 
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional
 
 import pandas as pd
 import torch
 from datasets import DatasetDict, load_dataset
 from torch.utils.data import DataLoader, Dataset
-from transformers import (
-    AutoTokenizer,
-    PreTrainedTokenizer,
-    PreTrainedTokenizerBase,
-)
-
-# Candidate column names seen across BioLaySumm variants.
-CANDIDATE_INPUT_KEYS: Tuple[str, ...] = (
-    "radiology_report",
-    "expert_report",
-    "report",
-    "source",
-)
-CANDIDATE_TARGET_KEYS: Tuple[str, ...] = (
-    "layman_report",
-    "lay_summary",
-    "summary",
-    "target",
-)
-
-
-def _guess_column(names: Sequence[str], candidates: Sequence[str]) -> str:
-    """Pick the first matching column regardless of letter casing.
-
-    Args:
-        names: Column names discovered in the dataset.
-        candidates: Preferred column names ordered by priority.
-
-    Returns:
-        The column name found in ``names`` or the first entry from ``names`` as
-        a fallback.
-    """
-    names_lower = [col.lower() for col in names]
-    for candidate in candidates:
-        if candidate.lower() in names_lower:
-            return names[names_lower.index(candidate.lower())]
-    return names[0]
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerBase
 
 
 # ---------------------------------------------------------------------------
-# Hugging Face Trainer helpers
-# ---------------------------------------------------------------------------
-
 def load_biolaysumm(split_mapping: Optional[Dict[str, str]] = None) -> DatasetDict:
     """Load the BioLaySumm 2025 open-source dataset from Hugging Face.
 
@@ -87,58 +43,10 @@ def build_tokenized(
     target_col: Optional[str] = None,
     add_prefix: str = "summarize radiology: ",
 ) -> Tuple[DatasetDict, str, str]:
-    """Tokenise the dataset for usage with Hugging Face's Trainer.
-
-    Args:
-        raw: Dataset splits to tokenise.
-        tokenizer: Pre-trained tokenizer responsible for encoding text.
-        max_input_len: Maximum encoder input length.
-        max_target_len: Maximum decoder target length.
-        input_col: Optional override for the source column.
-        target_col: Optional override for the target column.
-        add_prefix: Instruction prefix prepended to each input example.
-
-    Returns:
-        A tuple containing the tokenised dataset alongside the column names
-        chosen for the input and target fields.
-    """
-    sample = raw["train"].features
-    cols = list(sample.keys())
-    input_col = input_col or _guess_column(cols, CANDIDATE_INPUT_KEYS)
-    target_col = target_col or _guess_column(cols, CANDIDATE_TARGET_KEYS)
-
-    print(f"🔍 Using columns: input='{input_col}' | target='{target_col}'")
-
-    def preprocess(batch):
-        sources = [add_prefix + s for s in batch[input_col]]
-        model_inputs = tokenizer(
-            sources,
-            max_length=max_input_len,
-            truncation=True,
-            padding="max_length",
-        )
-        labels = tokenizer(
-            batch[target_col],
-            max_length=max_target_len,
-            truncation=True,
-            padding="max_length",
-        )
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
-
-    tokenized = raw.map(preprocess, batched=True, remove_columns=cols)
-    return tokenized, input_col, target_col
-
-
-# ---------------------------------------------------------------------------
-# Manual training loop helpers
-# ---------------------------------------------------------------------------
-
 class RadiologyDataset(Dataset):
     """PyTorch dataset for radiology report → lay summary generation.
 
-    Mirrors the preprocessing used by :func:`build_tokenized` so both the
-    Trainer workflow and manual training loop remain interchangeable.
+    Mirrors the preprocessing required by the custom training loop.
     """
 
     def __init__(
@@ -220,7 +128,7 @@ def create_dataloader(
     max_target_length: int = 256,
     num_workers: int = 4,
 ) -> DataLoader:
-    """Create a ``DataLoader`` mirroring the Trainer preprocessing pipeline.
+    """Create a ``DataLoader`` compatible with the manual training loop.
 
     Args:
         csv_path: Path to the CSV file providing ``report_text`` / ``lay_summary``.

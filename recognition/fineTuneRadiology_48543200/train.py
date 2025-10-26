@@ -1,10 +1,4 @@
-"""
-Custom training loop for FLAN-T5 + LoRA on the BioLaySumm dataset.
-
-The script replaces Hugging Face's `Seq2SeqTrainer` with a manual training
-pipeline that still honours the original CLI options while adding the richer
-logging, checkpointing, and ROUGE evaluation flow from `new_train.py`.
-"""
+"""Custom training loop for FLAN-T5 + LoRA on the BioLaySumm dataset."""
 
 from __future__ import annotations
 
@@ -681,7 +675,7 @@ def parse_args() -> argparse.Namespace:
         dest="max_source_length",
         type=int,
         default=1024,
-        help="Alias retained from the Trainer script.",
+        help="Legacy alias for --max_source_length.",
     )
     parser.add_argument("--max_target_len", dest="max_target_length", type=int, default=256)
     parser.add_argument(
