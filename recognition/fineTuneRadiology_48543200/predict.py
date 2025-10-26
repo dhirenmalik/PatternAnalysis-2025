@@ -1,104 +1,474 @@
-# predict.py (updated for Task 13 - Radiology → Lay Summary)
+"""Evaluation script for the manual FLAN‑T5 + LoRA training pipeline.
+
+Combines the lightweight Hugging Face dataset inspection workflow with the
+batch-oriented evaluation, reporting, and artefact saving features developed
+for the custom trainer. The script:
+
+* loads a checkpoint produced by the manual training loop (LoRA adapters)
+* runs batched generation on the CSV splits created by ``data_setup.py``
+* computes ROUGE scores and prints sample predictions
+* optionally evaluates a subset of the Hugging Face validation split for quick
+  sanity checks, mirroring the earlier ``predict.py`` behaviour
+* saves predictions, ROUGE metrics, and textual reports to disk
+"""
+
+from __future__ import annotations
+
 import argparse
-import os
-import torch
-import numpy as np
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from datasets import load_dataset
-from peft import PeftModel
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import evaluate
+import numpy as np
+import pandas as pd
+import torch
+from peft import PeftConfig, PeftModel
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokenizerBase
 
-from dataset import load_biolaysumm
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--model_dir", default="outputs_flan_t5_lora")
-    p.add_argument("--num_examples", type=int, default=5)
-    p.add_argument("--max_input_len", type=int, default=1024)
-    p.add_argument("--max_target_len", type=int, default=256)
-    p.add_argument("--add_prefix", default="summarize radiology: ")
-    p.add_argument("--rouge_samples", type=int, default=500, help="Number of validation samples for ROUGE eval")
-    return p.parse_args()
+from dataset import RadiologyDataset, load_biolaysumm
+from modules import load_tokenizer, print_model_info
 
 
-def main():
-    args = parse_args()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+ROUGE_METRIC = evaluate.load("rouge")
 
-    # Allow local folder
-    model_dir = args.model_dir.lstrip("./")
 
-    # Load tokenizer + model
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
-    base_model = AutoModelForSeq2SeqLM.from_pretrained(model_dir)
-    model = base_model.to(device)
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def load_model(checkpoint_path: str, device: torch.device) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase]:
+    """Load a FLAN-T5 model, merging LoRA adapters when present.
+
+    Args:
+        checkpoint_path: Directory containing the saved model or LoRA adapters.
+        device: Target device to place the model on.
+
+    Returns:
+        Tuple of the loaded model (in eval mode) and the corresponding tokenizer.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+
+    try:
+        config = PeftConfig.from_pretrained(checkpoint_path)
+    except (OSError, ValueError):
+        # Not a PEFT checkpoint; fall back to standard loading.
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint_path)
+    else:
+        base_model_name = config.base_model_name_or_path
+        tokenizer = load_tokenizer(base_model_name)
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+        model = PeftModel.from_pretrained(base_model, checkpoint_path)
+        model = model.merge_and_unload()
+
+    model = model.to(device).eval()
+    print_model_info(model)
+    return model, tokenizer
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+def prepare_csv_dataloader(
+    tokenizer: PreTrainedTokenizerBase,
+    data_dir: Path,
+    split: str,
+    batch_size: int,
+    max_source_length: int,
+    max_target_length: int,
+    prefix: str,
+    device: torch.device,
+    limit_samples: Optional[int] = None,
+    num_workers: int = 2,
+) -> Tuple[RadiologyDataset, DataLoader]:
+    """Build a ``DataLoader`` from CSV splits produced by ``data_setup.py``.
+
+    Args:
+        tokenizer: Tokenizer aligned with the fine-tuned model.
+        data_dir: Directory that contains ``train.csv`` / ``val.csv`` / ``test.csv``.
+        split: Dataset split to evaluate (``train``, ``val``/``validation``, or ``test``).
+        batch_size: Number of samples per inference batch.
+        max_source_length: Maximum encoder sequence length.
+        max_target_length: Maximum decoder sequence length.
+        prefix: Instruction prefix prepended to the source text.
+        device: Target device used to determine pin_memory behaviour.
+        limit_samples: Optional cap on the number of examples evaluated.
+        num_workers: Background worker count for the dataloader.
+
+    Returns:
+        Tuple containing the dataset instance and the dataloader.
+    """
+    split_map = {"val": "val", "validation": "val", "test": "test", "train": "train"}
+    split_key = split_map.get(split.lower(), split.lower())
+    csv_path = data_dir / f"{split_key}.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV split not found: {csv_path}")
+
+    dataset = RadiologyDataset(
+        csv_path=str(csv_path),
+        tokenizer=tokenizer,
+        max_source_length=max_source_length,
+        max_target_length=max_target_length,
+        prefix=prefix,
+    )
+
+    if limit_samples is not None:
+        dataset.data = dataset.data.head(limit_samples).reset_index(drop=True)
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    return dataset, dataloader
+
+
+# ---------------------------------------------------------------------------
+# Generation & evaluation
+# ---------------------------------------------------------------------------
+
+def generate_predictions(
+    model: AutoModelForSeq2SeqLM,
+    tokenizer: PreTrainedTokenizerBase,
+    dataloader: DataLoader,
+    device: torch.device,
+    max_length: int,
+    num_beams: int,
+    no_repeat_ngram_size: int,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Generate predictions for every batch in the dataloader.
+
+    Args:
+        model: Fine-tuned model used for generation.
+        tokenizer: Tokenizer for decoding predictions and inputs.
+        dataloader: Loader that yields batches from the evaluation split.
+        device: Device on which inference runs.
+        max_length: Maximum generation length.
+        num_beams: Beam search width.
+        no_repeat_ngram_size: Prevents repeating n-grams during generation.
+
+    Returns:
+        Tuple of predicted summaries, reference summaries, and decoded inputs.
+    """
     model.eval()
+    predictions: List[str] = []
+    references: List[str] = []
+    decoded_inputs: List[str] = []
 
-    # Load dataset
-    raw = load_biolaysumm()
-    test = raw["test"]
-    cols = list(test.features.keys())
-    in_col = next((c for c in cols if "report" in c.lower() or "source" in c.lower()), cols[0])
-    tgt_col = next((c for c in cols if "summary" in c.lower() or "target" in c.lower()), cols[-1])
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Generating"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].clone()  # avoid modifying original batch
 
-    print(f"Using columns -> input: {in_col} | target: {tgt_col}")
-
-    # ----------------------------
-    # Example qualitative outputs
-    # ----------------------------
-    for ex in test.select(range(min(args.num_examples, len(test)))):
-        prompt = args.add_prefix + ex[in_col]
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True,
-                           max_length=args.max_input_len).to(device)
-        with torch.no_grad():
-            gen = model.generate(
-                **inputs,
-                max_length=args.max_target_len,
-                num_beams=4,
-                length_penalty=1.0,
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=max_length,
+                num_beams=num_beams,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                early_stopping=True,
             )
-        pred = tokenizer.decode(gen[0], skip_special_tokens=True)
 
-        print("\n=== EXAMPLE ===")
-        print("EXPERT REPORT:\n", ex[in_col][:800], "..." if len(ex[in_col]) > 800 else "")
-        print("\nMODEL SUMMARY:\n", pred)
-        if tgt_col in ex and isinstance(ex[tgt_col], str):
-            print("\nREFERENCE SUMMARY:\n", ex[tgt_col])
+            predictions.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
 
-    # ----------------------------
-    # Quantitative ROUGE evaluation
-    # ----------------------------
-    print("\n📊 Computing ROUGE metrics on subset...")
-    rouge = evaluate.load("rouge")
+            labels[labels == -100] = tokenizer.pad_token_id
+            references.extend(tokenizer.batch_decode(labels, skip_special_tokens=True))
+            decoded_inputs.extend(tokenizer.batch_decode(input_ids, skip_special_tokens=True))
 
-    subset = raw["validation"].select(range(min(args.rouge_samples, len(raw["validation"]))))
-    preds, refs = [], []
+    return predictions, references, decoded_inputs
 
-    for i in range(len(subset)):
-        example = subset[i]
-        text_in = args.add_prefix + example[in_col]
-        inputs = tokenizer(text_in, return_tensors="pt", truncation=True,
-                           padding=True, max_length=args.max_input_len).to(
-            device)
+
+def compute_rouge_scores(predictions: List[str], references: List[str]) -> Dict[str, float]:
+    """Compute ROUGE metrics for a list of predictions and references.
+
+    Args:
+        predictions: Generated summaries.
+        references: Ground-truth summaries aligned with ``predictions``.
+
+    Returns:
+        Dictionary of ROUGE-1/2/L/Lsum scores.
+    """
+    formatted_preds = ["\n".join(pred.strip().split(".")) or "empty" for pred in predictions]
+    formatted_refs = ["\n".join(ref.strip().split(".")) or "empty" for ref in references]
+
+    result = ROUGE_METRIC.compute(
+        predictions=formatted_preds,
+        references=formatted_refs,
+        use_stemmer=True,
+        use_aggregator=True,
+    )
+    return {metric: float(result[metric]) for metric in ("rouge1", "rouge2", "rougeL", "rougeLsum")}
+
+
+def evaluate_hf_subset(
+    model: AutoModelForSeq2SeqLM,
+    tokenizer: PreTrainedTokenizerBase,
+    device: torch.device,
+    add_prefix: str,
+    max_input_len: int,
+    max_target_len: int,
+    num_samples: int,
+    split: str = "validation",
+) -> Dict[str, float]:
+    """Run ROUGE computation on a subset of the Hugging Face dataset.
+
+    Mimics the original ``predict.py`` quick-evaluation flow.
+
+    Args:
+        model: Fine-tuned model for generation.
+        tokenizer: Tokenizer aligned with the model.
+        device: Device on which inference runs.
+        add_prefix: Prompt prefix prepended to each report.
+        max_input_len: Maximum encoder length.
+        max_target_len: Maximum decoder length.
+        num_samples: Number of validation samples to evaluate.
+        split: Dataset split to evaluate (defaults to ``validation``).
+
+    Returns:
+        ROUGE metric dictionary.
+    """
+    if num_samples <= 0:
+        return {}
+
+    raw = load_biolaysumm()
+    dataset = raw[split]
+    cols = list(dataset.features.keys())
+    input_col = next((c for c in cols if "report" in c.lower() or "source" in c.lower()), cols[0])
+    target_col = next((c for c in cols if "summary" in c.lower() or "target" in c.lower()), cols[-1])
+
+    subset = dataset.select(range(min(num_samples, len(dataset))))
+    predictions: List[str] = []
+    references: List[str] = []
+
+    for example in subset:
+        prompt = add_prefix + example[input_col]
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_input_len,
+        ).to(device)
+
         with torch.no_grad():
-            output = model.generate(**inputs, max_length=args.max_target_len)
-        preds.append(tokenizer.decode(output[0], skip_special_tokens=True))
-        refs.append(example[tgt_col])
+            generated = model.generate(**inputs, max_length=max_target_len)
 
-    results = rouge.compute(predictions=preds, references=refs, use_stemmer=True)
-    results = {k: round(v, 4) for k, v in results.items()}
+        predictions.append(tokenizer.decode(generated[0], skip_special_tokens=True))
+        references.append(example[target_col])
 
+    rouge_scores = compute_rouge_scores(predictions, references)
+    print("\n📊 Hugging Face validation subset ROUGE:")
+    for key, value in rouge_scores.items():
+        print(f"  {key}: {value:.4f}")
+    return rouge_scores
+
+
+# ---------------------------------------------------------------------------
+# Reporting helpers
+# ---------------------------------------------------------------------------
+
+def print_examples(
+    predictions: List[str],
+    references: List[str],
+    inputs: List[str],
+    num_examples: int,
+) -> None:
+    """Print representative prediction examples to stdout."""
+    if not predictions:
+        print("\n⚠️  No predictions available to display.")
+        return
+
+    num_examples = min(num_examples, len(predictions))
+    step = max(len(predictions) // num_examples, 1)
+
+    print("\n" + "=" * 60)
+    print("📝 Example Predictions")
+    print("=" * 60)
+
+    for idx in range(num_examples):
+        sample_idx = min(idx * step, len(predictions) - 1)
+        print(f"\nExample {idx + 1} (index {sample_idx})")
+        print("-" * 60)
+        print(f"\n📄 INPUT:\n{inputs[sample_idx][:400]}{'...' if len(inputs[sample_idx]) > 400 else ''}")
+        print(f"\n✅ REFERENCE:\n{references[sample_idx]}")
+        print(f"\n🔮 PREDICTION:\n{predictions[sample_idx]}")
+        print("\n" + "-" * 60)
+
+
+def save_results(
+    predictions: List[str],
+    references: List[str],
+    inputs: List[str],
+    rouge_scores: Dict[str, float],
+    output_dir: Path,
+) -> None:
+    """Persist predictions, ROUGE scores, and summary reports to disk."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(
+        {
+            "input_report": inputs,
+            "reference_summary": references,
+            "predicted_summary": predictions,
+        }
+    )
+    df.to_csv(output_dir / "predictions.csv", index=False)
+
+    with open(output_dir / "rouge_scores.json", "w", encoding="utf-8") as fh:
+        json.dump(rouge_scores, fh, indent=2)
+
+    lengths_pred = [len(pred.split()) for pred in predictions]
+    lengths_ref = [len(ref.split()) for ref in references]
+    avg_pred_len = float(np.mean(lengths_pred)) if lengths_pred else 0.0
+    avg_ref_len = float(np.mean(lengths_ref)) if lengths_ref else 0.0
+    ratio = (avg_pred_len / avg_ref_len) if avg_ref_len else 0.0
+
+    report_path = output_dir / "evaluation_report.txt"
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write("=" * 80 + "\nFLAN-T5 Radiology Summarisation Report\n" + "=" * 80 + "\n")
+        fh.write(f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        fh.write(f"Samples:   {len(predictions)}\n\n")
+        fh.write("ROUGE Scores\n" + "-" * 80 + "\n")
+        for key, value in rouge_scores.items():
+            fh.write(f"{key.upper():<10}: {value:.4f}\n")
+        fh.write("\nLength Statistics\n" + "-" * 80 + "\n")
+        fh.write(f"Average prediction length: {avg_pred_len:.1f}\n")
+        fh.write(f"Average reference length:  {avg_ref_len:.1f}\n")
+        fh.write(f"Length ratio (pred/ref):   {ratio:.2f}\n")
+
+
+def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, float]) -> None:
+    """Append ROUGE scores to the checkpoint ``RESULTS.txt`` file."""
+    if not rouge_scores:
+        return
+
+    results_file = checkpoint_path / "RESULTS.txt"
+    with open(results_file, "a", encoding="utf-8") as fh:
+        fh.write("\n\nROUGE evaluation:\n")
+        for key, value in rouge_scores.items():
+            fh.write(f"{key}: {value:.4f}\n")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line options for evaluation."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate a FLAN-T5 LoRA checkpoint on radiology summaries.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument("--checkpoint", default="outputs_flan_t5_lora/best_model", help="Path to checkpoint directory.")
+    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Inference device.")
+    parser.add_argument(
+        "--data_dir",
+        default="recognition/fineTuneRadiology_48543200/data",
+        help="Directory containing train/val/test CSV files.",
+    )
+    parser.add_argument("--split", default="test", help="Dataset split to evaluate (train/val/test).")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for generation.")
+    parser.add_argument("--max_source_length", type=int, default=512, help="Maximum encoder sequence length.")
+    parser.add_argument("--max_target_length", type=int, default=256, help="Maximum decoder sequence length.")
+    parser.add_argument("--max_length", type=int, default=256, help="Maximum length for generation outputs.")
+    parser.add_argument("--num_beams", type=int, default=4, help="Beam search width.")
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=3, help="No-repeat n-gram constraint.")
+    parser.add_argument("--num_examples", type=int, default=5, help="Number of examples to print.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional cap on samples evaluated from CSV.")
+    parser.add_argument("--prefix", default="summarize for a layperson: ", help="Instruction prefix for inputs.")
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        help="Directory to store predictions; defaults to <checkpoint>/evaluation.",
+    )
+    parser.add_argument(
+        "--hf_rouge_samples",
+        type=int,
+        default=0,
+        help="If > 0, also compute ROUGE on this many Hugging Face validation samples.",
+    )
+    parser.add_argument("--hf_split", default="validation", help="Hugging Face split used for optional evaluation.")
+    parser.add_argument("--hf_prefix", default="summarize radiology: ", help="Prefix used for Hugging Face evaluation.")
+
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Entry point for evaluation and reporting."""
+    args = parse_args()
+
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if device.type != args.device:
+        print(f"⚠️  Falling back to {device.type.upper()} because CUDA is unavailable.")
+
+    checkpoint_path = Path(args.checkpoint)
+    output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path / "evaluation"
+
+    model, tokenizer = load_model(checkpoint_path=str(checkpoint_path), device=device)
+    dataset, dataloader = prepare_csv_dataloader(
+        tokenizer=tokenizer,
+        data_dir=Path(args.data_dir),
+        split=args.split,
+        batch_size=args.batch_size,
+        max_source_length=args.max_source_length,
+        max_target_length=args.max_target_length,
+        prefix=args.prefix,
+        device=device,
+        limit_samples=args.limit,
+    )
+
+    start = datetime.now()
+    predictions, references, inputs = generate_predictions(
+        model=model,
+        tokenizer=tokenizer,
+        dataloader=dataloader,
+        device=device,
+        max_length=args.max_length,
+        num_beams=args.num_beams,
+        no_repeat_ngram_size=args.no_repeat_ngram_size,
+    )
+    elapsed = (datetime.now() - start).total_seconds()
+
+    print(f"\n⚡ Processed {len(predictions)} samples in {elapsed:.2f}s "
+          f"({len(predictions) / elapsed if elapsed else 0:.2f} summaries/sec)")
+
+    rouge_scores = compute_rouge_scores(predictions, references)
     print("\n✅ ROUGE Results:")
-    for k, v in results.items():
-        print(f"{k}: {v}")
+    for key, value in rouge_scores.items():
+        print(f"  {key}: {value:.4f}")
 
-    os.makedirs(model_dir, exist_ok=True)
-    with open(os.path.join(model_dir, "RESULTS.txt"), "a") as f:
-        f.write("\n\nROUGE evaluation:\n")
-        for k, v in results.items():
-            f.write(f"{k}: {v}\n")
+    print_examples(predictions, references, inputs, args.num_examples)
+    save_results(predictions, references, inputs, rouge_scores, output_dir)
+    append_results_to_checkpoint(checkpoint_path, rouge_scores)
 
-    print(f"\n📄 ROUGE results appended to {os.path.join(model_dir, 'RESULTS.txt')}")
+    if args.hf_rouge_samples > 0:
+        evaluate_hf_subset(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            add_prefix=args.hf_prefix,
+            max_input_len=args.max_source_length,
+            max_target_len=args.max_target_length,
+            num_samples=args.hf_rouge_samples,
+            split=args.hf_split,
+        )
+
+    print("\n📁 Artefacts saved to:", output_dir.resolve())
+
 
 if __name__ == "__main__":
     main()
