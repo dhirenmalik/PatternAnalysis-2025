@@ -4,3 +4,4 @@ recognition/fineTuneRadiology_48543200/data/
 .venv/
 outputs_flan_t5_lora/
 .idea/
+.DS_Store
