@@ -389,17 +389,17 @@ class ManualTrainer:
             attention_mask = batch["attention_mask"].to(self.device)
             labels = batch["labels"].to(self.device)
 
-        autocast_ctx = (
-            torch.amp.autocast(device_type=self.device.type)
-            if self.use_mixed_precision
-            else nullcontext()
-        )
-        with autocast_ctx:
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
+            autocast_ctx = (
+                torch.amp.autocast(device_type=self.device.type)
+                if self.use_mixed_precision
+                else nullcontext()
             )
+            with autocast_ctx:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
             total_loss += outputs.loss.item()
 
             generated = self.model.generate(
