@@ -1,9 +1,7 @@
-"""
-Model utilities for FLAN-T5 with optional LoRA adapters.
+"""Model utilities shared by Trainer and manual training workflows.
 
-Supports both Hugging Face's Trainer workflow and the emerging manual training
-loop by exposing shared helpers for loading tokenizers, constructing models,
-and inspecting parameter counts.
+Exposes helpers for loading FLAN-T5 models, attaching LoRA adapters, and
+retrieving quick parameter statistics. All docstrings follow the Google style.
 """
 
 from __future__ import annotations
@@ -13,13 +11,12 @@ from typing import Optional, Tuple
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokenizerBase
 
 
 @dataclass
 class ModelConfig:
-    """
-    Configuration bundle for FLAN-T5 + LoRA fine-tuning.
+    """Configuration bundle for FLAN-T5 + LoRA fine-tuning.
 
     Attributes:
         model_name: Base Hugging Face model identifier.
@@ -42,8 +39,15 @@ class ModelConfig:
 # Tokenizer helpers
 # ---------------------------------------------------------------------------
 
-def load_tokenizer(model_name: str = "google/flan-t5-base"):
-    """Load the FLAN-T5 tokenizer with basic diagnostics."""
+def load_tokenizer(model_name: str = "google/flan-t5-base") -> PreTrainedTokenizerBase:
+    """Load the FLAN-T5 tokenizer with basic diagnostics.
+
+    Args:
+        model_name: Hugging Face model identifier to initialise the tokenizer.
+
+    Returns:
+        The tokenizer loaded from ``model_name``.
+    """
     print(f"🔤 Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     print(f"   Vocab size: {tokenizer.vocab_size:,} | pad_token_id: {tokenizer.pad_token_id}")
@@ -62,9 +66,8 @@ def build_model(
     lora_dropout: float = 0.1,
     target_modules: Optional[Tuple[str, ...]] = None,
     move_to_device: bool = False,
-):
-    """
-    Construct a FLAN-T5 model optionally equipped with LoRA adapters.
+) -> AutoModelForSeq2SeqLM:
+    """Construct a FLAN-T5 model optionally equipped with LoRA adapters.
 
     Args:
         model_name: Backbone model checkpoint.
@@ -74,6 +77,9 @@ def build_model(
         lora_dropout: Adapter dropout rate.
         target_modules: Tuple of attention projections to adapt.
         move_to_device: Move model to GPU immediately if available.
+
+    Returns:
+        The loaded FLAN-T5 model, optionally wrapped with LoRA adapters.
     """
     print("=" * 60)
     print(f"🧠 Loading base model: {model_name}")
@@ -121,13 +127,15 @@ def build_model(
 def load_model_and_tokenizer(
     cfg: Optional[ModelConfig] = None,
     move_to_device: Optional[bool] = None,
-):
-    """
-    Convenience wrapper used by both Trainer and manual training pipelines.
+) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase, ModelConfig]:
+    """Load both model and tokenizer using a shared configuration.
 
     Args:
-        cfg: Optional `ModelConfig`. If omitted the defaults are used.
+        cfg: Optional ``ModelConfig``. If omitted the defaults are used.
         move_to_device: Override for immediate device transfer.
+
+    Returns:
+        Tuple of (model, tokenizer, resolved configuration).
     """
     cfg = cfg or ModelConfig()
     move_flag = False if move_to_device is None else move_to_device
@@ -155,8 +163,12 @@ def load_model_and_tokenizer(
 # Utility helpers for manual inspection
 # ---------------------------------------------------------------------------
 
-def print_model_info(model):
-    """Display total, trainable, and frozen parameter counts."""
+def print_model_info(model: torch.nn.Module) -> None:
+    """Display total, trainable, and frozen parameter counts.
+
+    Args:
+        model: Model whose parameters should be summarised.
+    """
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen_params = total_params - trainable_params
