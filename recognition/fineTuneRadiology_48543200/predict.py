@@ -282,7 +282,14 @@ def print_examples(
     inputs: List[str],
     num_examples: int,
 ) -> None:
-    """Print representative prediction examples to stdout."""
+    """Print representative prediction examples to stdout.
+
+    Args:
+        predictions: Generated summaries to display.
+        references: Ground-truth summaries aligned with ``predictions``.
+        inputs: Source radiology reports corresponding to each prediction.
+        num_examples: Maximum number of examples to display.
+    """
     if not predictions:
         print("\n⚠️  No predictions available to display.")
         return
@@ -311,7 +318,15 @@ def save_results(
     rouge_scores: Dict[str, float],
     output_dir: Path,
 ) -> None:
-    """Persist predictions, ROUGE scores, and summary reports to disk."""
+    """Persist predictions, ROUGE scores, and summary reports to disk.
+
+    Args:
+        predictions: Generated summaries.
+        references: Reference summaries aligned with ``predictions``.
+        inputs: Original radiology report texts.
+        rouge_scores: ROUGE metric results keyed by metric name.
+        output_dir: Directory where artefacts are written.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.DataFrame(
@@ -347,7 +362,12 @@ def save_results(
 
 
 def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, float]) -> None:
-    """Append ROUGE scores to the checkpoint ``RESULTS.txt`` file."""
+    """Append ROUGE scores to the checkpoint ``RESULTS.txt`` file.
+
+    Args:
+        checkpoint_path: Directory that owns ``RESULTS.txt``.
+        rouge_scores: ROUGE metric values to append.
+    """
     if not rouge_scores:
         return
 
