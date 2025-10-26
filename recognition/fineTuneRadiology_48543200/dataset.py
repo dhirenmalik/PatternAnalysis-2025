@@ -1,18 +1,12 @@
-"""
-Dataset utilities for BioLaySumm radiology report summarisation.
+"""Dataset utilities shared by Trainer and manual training workflows.
 
-This module provides:
-1. Helper functions (`load_biolaysumm`, `build_tokenized`) used by the
-   Hugging Face `Seq2SeqTrainer`.
-2. A PyTorch `Dataset` + `DataLoader` combo (`RadiologyDataset`,
-   `create_dataloader`) designed for manual training loops.
-
-Both paths share the same column guessing logic and tokenisation defaults so
-workflows remain consistent while the project transitions away from the trainer.
+This module provides helpers for loading and tokenising the BioLaySumm dataset
+when using Hugging Face's Trainer as well as PyTorch dataset/dataloader classes
+tailored for custom training loops.
 """
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -25,17 +19,35 @@ from transformers import (
 )
 
 # Candidate column names seen across BioLaySumm variants.
-CANDIDATE_INPUT_KEYS = ("radiology_report", "expert_report", "report", "source")
-CANDIDATE_TARGET_KEYS = ("layman_report", "lay_summary", "summary", "target")
+CANDIDATE_INPUT_KEYS: Tuple[str, ...] = (
+    "radiology_report",
+    "expert_report",
+    "report",
+    "source",
+)
+CANDIDATE_TARGET_KEYS: Tuple[str, ...] = (
+    "layman_report",
+    "lay_summary",
+    "summary",
+    "target",
+)
 
 
-def _guess_column(names, candidates):
-    """Pick the first matching column regardless of letter casing."""
-    names_lower = [n.lower() for n in names]
+def _guess_column(names: Sequence[str], candidates: Sequence[str]) -> str:
+    """Pick the first matching column regardless of letter casing.
+
+    Args:
+        names: Column names discovered in the dataset.
+        candidates: Preferred column names ordered by priority.
+
+    Returns:
+        The column name found in ``names`` or the first entry from ``names`` as
+        a fallback.
+    """
+    names_lower = [col.lower() for col in names]
     for candidate in candidates:
         if candidate.lower() in names_lower:
             return names[names_lower.index(candidate.lower())]
-    # Fallback heuristics: first column for inputs, second for targets.
     return names[0]
 
 
@@ -43,14 +55,17 @@ def _guess_column(names, candidates):
 # Hugging Face Trainer helpers
 # ---------------------------------------------------------------------------
 
-def load_biolaysumm(
-    split_mapping: Optional[Dict[str, str]] = None,
-) -> DatasetDict:
-    """
-    Load the BioLaySumm 2025 open-source dataset.
+def load_biolaysumm(split_mapping: Optional[Dict[str, str]] = None) -> DatasetDict:
+    """Load the BioLaySumm 2025 open-source dataset from Hugging Face.
 
-    If validation / test splits are missing, they are created from the train
-    portion to keep the Trainer workflow unchanged.
+    Args:
+        split_mapping: Optional mapping from expected split names to dataset
+            split identifiers. Currently unused but retained for future
+            compatibility.
+
+    Returns:
+        A ``DatasetDict`` containing ``train``, ``validation`` and ``test``
+        splits. Missing splits are inferred by splitting the training set.
     """
     ds = load_dataset("BioLaySumm/BioLaySumm2025-LaymanRRG-opensource-track")
 
@@ -72,11 +87,20 @@ def build_tokenized(
     target_col: Optional[str] = None,
     add_prefix: str = "summarize radiology: ",
 ) -> Tuple[DatasetDict, str, str]:
-    """
-    Tokenise the dataset for Hugging Face Trainer usage.
+    """Tokenise the dataset for usage with Hugging Face's Trainer.
+
+    Args:
+        raw: Dataset splits to tokenise.
+        tokenizer: Pre-trained tokenizer responsible for encoding text.
+        max_input_len: Maximum encoder input length.
+        max_target_len: Maximum decoder target length.
+        input_col: Optional override for the source column.
+        target_col: Optional override for the target column.
+        add_prefix: Instruction prefix prepended to each input example.
 
     Returns:
-        tokenized dataset dict, input column used, target column used.
+        A tuple containing the tokenised dataset alongside the column names
+        chosen for the input and target fields.
     """
     sample = raw["train"].features
     cols = list(sample.keys())
@@ -111,11 +135,10 @@ def build_tokenized(
 # ---------------------------------------------------------------------------
 
 class RadiologyDataset(Dataset):
-    """
-    PyTorch dataset for radiology report → lay summary generation.
+    """PyTorch dataset for radiology report → lay summary generation.
 
-    Provides identical preprocessing to the Trainer pipeline so both training
-    strategies stay interchangeable.
+    Mirrors the preprocessing used by :func:`build_tokenized` so both the
+    Trainer workflow and manual training loop remain interchangeable.
     """
 
     def __init__(
@@ -126,6 +149,16 @@ class RadiologyDataset(Dataset):
         max_target_length: int = 256,
         prefix: str = "summarize for a layperson: ",
     ):
+        """Initialise the dataset from a CSV file.
+
+        Args:
+            csv_path: Location of the CSV file containing ``report_text`` and
+                ``lay_summary`` columns.
+            tokenizer: Tokenizer used for encoding source and target text.
+            max_source_length: Maximum sequence length for encoder-side text.
+            max_target_length: Maximum sequence length for decoder targets.
+            prefix: Task prompt prepended to each source example.
+        """
         self.data = pd.read_csv(csv_path)
         self.tokenizer = tokenizer
         self.max_source_length = max_source_length
@@ -135,9 +168,19 @@ class RadiologyDataset(Dataset):
         print(f"✅ Loaded {len(self.data)} samples from {Path(csv_path).name}")
 
     def __len__(self) -> int:
+        """Return the number of rows available in the dataset."""
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Tokenise and return a single example.
+
+        Args:
+            idx: Zero-based row index to retrieve.
+
+        Returns:
+            A dictionary containing ``input_ids``, ``attention_mask`` and
+            ``labels`` ready for model consumption.
+        """
         row = self.data.iloc[idx]
         source_text = self.prefix + row["report_text"]
         target_text = row["lay_summary"]
@@ -177,9 +220,19 @@ def create_dataloader(
     max_target_length: int = 256,
     num_workers: int = 4,
 ) -> DataLoader:
-    """
-    Build a PyTorch DataLoader that mirrors the preprocessing used in
-    `build_tokenized`.
+    """Create a ``DataLoader`` mirroring the Trainer preprocessing pipeline.
+
+    Args:
+        csv_path: Path to the CSV file providing ``report_text`` / ``lay_summary``.
+        tokenizer: Tokenizer used for encoding.
+        batch_size: Batch size fed into the manual training loop.
+        shuffle: Whether to randomise order (useful for training).
+        max_source_length: Maximum encoder length in tokens.
+        max_target_length: Maximum decoder length in tokens.
+        num_workers: Parallel workers for background data loading.
+
+    Returns:
+        A ``DataLoader`` that yields batches compatible with the manual loop.
     """
     dataset = RadiologyDataset(
         csv_path=csv_path,
