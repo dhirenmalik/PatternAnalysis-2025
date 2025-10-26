@@ -52,9 +52,9 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
     mps_backend = getattr(torch.backends, "mps", None)
     if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
-        import torch.mps
+        from torch import mps
 
-        torch.mps.manual_seed(seed)
+        mps.manual_seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"✅ Random seed set to {seed}")
 
