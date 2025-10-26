@@ -390,7 +390,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--checkpoint", default="outputs_flan_t5_lora/best_model", help="Path to checkpoint directory.")
-    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Inference device.")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "mps", "cpu"],
+        default="auto",
+        help="Inference device selection.",
+    )
     parser.add_argument(
         "--data_dir",
         default="recognition/fineTuneRadiology_48543200/data",
@@ -431,9 +436,32 @@ def main() -> None:
     """Entry point for evaluation and reporting."""
     args = parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    if device.type != args.device:
-        print(f"⚠️  Falling back to {device.type.upper()} because CUDA is unavailable.")
+    def resolve_device(choice: str) -> torch.device:
+        mps_backend = getattr(torch.backends, "mps", None)
+
+        if choice == "auto":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+                return torch.device("mps")
+            return torch.device("cpu")
+
+        if choice == "cuda":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            print("⚠️  CUDA requested but not available. Falling back to CPU.")
+            return torch.device("cpu")
+
+        if choice == "mps":
+            if mps_backend and mps_backend.is_available():  # pragma: no cover
+                return torch.device("mps")
+            print("⚠️  MPS requested but not available. Falling back to CPU.")
+            return torch.device("cpu")
+
+        return torch.device("cpu")
+
+    device = resolve_device(args.device)
+    print(f"🖥️  Using {device.type.upper()} for inference.")
 
     checkpoint_path = Path(args.checkpoint)
     output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path / "evaluation"

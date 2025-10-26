@@ -50,6 +50,11 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+        import torch.mps
+
+        torch.mps.manual_seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"✅ Random seed set to {seed}")
 
@@ -71,6 +76,7 @@ def get_hardware_info() -> Dict[str, Optional[str]]:
         "gpu_vram_total_gb": None,
         "gpu_vram_available_gb": None,
         "gpu_compute_capability": None,
+        "mps_available": bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()),
     }
 
     if info["cuda_available"]:
@@ -100,6 +106,7 @@ def print_hardware_info(info: Dict[str, Optional[str]]) -> None:
     print("=" * 60)
     print(f"  PyTorch Version: {info['pytorch_version']}")
     print(f"  CUDA Available: {info['cuda_available']}")
+    print(f"  MPS Available:  {info.get('mps_available', False)}")
     if info["cuda_available"]:
         print(f"  CUDA Version: {info['cuda_version']}")
         print(f"  GPU Name: {info['gpu_name']}")
@@ -109,6 +116,8 @@ def print_hardware_info(info: Dict[str, Optional[str]]) -> None:
             print(f"  VRAM Available: {info['gpu_vram_available_gb']} GB")
         if info["gpu_compute_capability"]:
             print(f"  Compute Capability: {info['gpu_compute_capability']}")
+    elif info.get("mps_available"):
+        print("  Using Apple Silicon Metal Performance Shaders (MPS)")
     else:
         print("  Running on CPU")
     print("=" * 60 + "\n")
@@ -727,12 +736,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def prepare_dataloaders(args, tokenizer) -> (DataLoader, DataLoader):
+def prepare_dataloaders(args, tokenizer, device: torch.device) -> (DataLoader, DataLoader):
     """Build train/validation dataloaders from CSV splits.
 
     Args:
         args: Parsed CLI arguments containing data and batching options.
         tokenizer: Tokenizer used to instantiate :class:`RadiologyDataset`.
+        device: Target device to inform DataLoader options.
 
     Returns:
         Tuple of training and validation dataloaders ready for use.
@@ -774,7 +784,7 @@ def prepare_dataloaders(args, tokenizer) -> (DataLoader, DataLoader):
         val_dataset = Subset(val_dataset, range(val_limit))
         print("🧪 Dry-run mode: limiting to 8 train / 4 val samples")
 
-    pin_memory = torch.cuda.is_available()
+    pin_memory = device.type == "cuda"
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -829,7 +839,17 @@ def main():
     hardware = get_hardware_info()
     print_hardware_info(hardware)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def detect_device() -> torch.device:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    device = detect_device()
+    print(f"🖥️  Using {device.type.upper()} for training.")
+
     use_mixed_precision = not args.no_mixed_precision and (device.type == "cuda")
     if args.fp16 and device.type == "cuda":
         use_mixed_precision = True
@@ -846,7 +866,7 @@ def main():
     print_model_info(model)
 
     print(f"\n📂 Building dataloaders from {args.data_dir}")
-    train_loader, val_loader = prepare_dataloaders(args, tokenizer)
+    train_loader, val_loader = prepare_dataloaders(args, tokenizer, device)
 
     trainer = ManualTrainer(
         model=model,
