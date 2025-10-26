@@ -22,6 +22,13 @@ import evaluate
 from dataset import RadiologyDataset
 from modules import ModelConfig, load_model_and_tokenizer, print_model_info
 
+# ---------------------------------------------------------------------------
+# Environment tweaks to quiet common backend warnings
+# ---------------------------------------------------------------------------
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 try:
     import matplotlib
 

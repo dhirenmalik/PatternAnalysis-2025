@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -31,6 +32,11 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokeniz
 
 from dataset import RadiologyDataset, load_biolaysumm
 from modules import load_tokenizer, print_model_info
+
+# Align runtime defaults with training script to avoid noisy warnings.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 
 ROUGE_METRIC = evaluate.load("rouge")
