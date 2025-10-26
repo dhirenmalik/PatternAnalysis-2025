@@ -1,211 +1,770 @@
-# train.py
-# COMP3710 Task 13 (Radiology → Lay Summary)
-# Student ID: 48543200
+"""
+Custom training loop for FLAN-T5 + LoRA on the BioLaySumm dataset.
+
+The script replaces Hugging Face's `Seq2SeqTrainer` with a manual training
+pipeline that still honours the original CLI options while adding the richer
+logging, checkpointing, and ROUGE evaluation flow from `new_train.py`.
+"""
+
+from __future__ import annotations
 
 import argparse
+import json
 import os
+import random
+import time
+from contextlib import nullcontext
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
 import numpy as np
 import torch
-from transformers import (
-    DataCollatorForSeq2Seq,
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
-)
+from torch.cuda.amp import GradScaler, autocast
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 import evaluate
 
-from modules import load_model_and_tokenizer, ModelConfig
-from dataset import load_biolaysumm, build_tokenized
+from dataset import RadiologyDataset
+from modules import ModelConfig, load_model_and_tokenizer, print_model_info
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
+rouge_metric = evaluate.load("rouge")
 
-    # existing args
-    p.add_argument("--model_name", default="google/flan-t5-base")
-    p.add_argument("--output_dir", default="./outputs_flan_t5_lora")
-    p.add_argument("--use_lora", action="store_true", default=True)
-    p.add_argument("--epochs", type=int, default=3)
-    p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--max_input_len", type=int, default=1024)
-    p.add_argument("--max_target_len", type=int, default=256)
-    p.add_argument("--logging_steps", type=int, default=50)
-    p.add_argument("--eval_steps", type=int, default=500)
-    p.add_argument("--save_steps", type=int, default=500)
-    p.add_argument("--warmup_ratio", type=float, default=0.03)
-    p.add_argument("--seed", type=int, default=42)
 
-    # NEW args for fast Colab debugging
-    p.add_argument("--subset", type=int, default=None,
-                   help="If set, use only this many samples from train and ~10% of that for val.")
-    p.add_argument("--fp16", action="store_true",
-                   help="Force fp16 mixed precision.")
-    p.add_argument("--checkpointing", action="store_true",
-                   help="Enable gradient checkpointing (only works without LoRA).")
-    p.add_argument("--eval_epoch", action="store_true",
-                   help="Evaluate only at end of each epoch.")
-    p.add_argument("--save_epoch", action="store_true",
-                   help="Save only at end of each epoch.")
+# ---------------------------------------------------------------------------
+# Reproducibility / hardware helpers
+# ---------------------------------------------------------------------------
 
-    return p.parse_args()
+def set_seed(seed: int) -> None:
+    """Set RNG seeds for Python, NumPy, and PyTorch (CPU/GPU)."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    print(f"✅ Random seed set to {seed}")
+
+
+def get_hardware_info() -> Dict[str, Optional[str]]:
+    """Collect lightweight hardware diagnostics for logging."""
+    info: Dict[str, Optional[str]] = {
+        "device": "cpu",
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        "pytorch_version": torch.__version__,
+        "num_gpus": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "gpu_name": None,
+        "gpu_vram_total_gb": None,
+        "gpu_vram_available_gb": None,
+        "gpu_compute_capability": None,
+    }
+
+    if info["cuda_available"]:
+        info["device"] = "cuda"
+        try:
+            props = torch.cuda.get_device_properties(0)
+            info["gpu_name"] = torch.cuda.get_device_name(0)
+            total_vram = props.total_memory / (1024**3)
+            allocated = torch.cuda.memory_allocated(0) / (1024**3)
+            info["gpu_vram_total_gb"] = f"{total_vram:.2f}"
+            info["gpu_vram_available_gb"] = f"{(total_vram - allocated):.2f}"
+            info["gpu_compute_capability"] = f"{props.major}.{props.minor}"
+        except RuntimeError as err:  # pragma: no cover - defensive
+            info["gpu_error"] = str(err)
+
+    return info
+
+
+def print_hardware_info(info: Dict[str, Optional[str]]) -> None:
+    """Pretty-print hardware diagnostics."""
+    print("\n" + "=" * 60)
+    print("🖥️  Hardware Information")
+    print("=" * 60)
+    print(f"  PyTorch Version: {info['pytorch_version']}")
+    print(f"  CUDA Available: {info['cuda_available']}")
+    if info["cuda_available"]:
+        print(f"  CUDA Version: {info['cuda_version']}")
+        print(f"  GPU Name: {info['gpu_name']}")
+        print(f"  Device Count: {info['num_gpus']}")
+        if info["gpu_vram_total_gb"]:
+            print(f"  VRAM Total: {info['gpu_vram_total_gb']} GB")
+            print(f"  VRAM Available: {info['gpu_vram_available_gb']} GB")
+        if info["gpu_compute_capability"]:
+            print(f"  Compute Capability: {info['gpu_compute_capability']}")
+    else:
+        print("  Running on CPU")
+    print("=" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def compute_rouge_metrics(
+    predictions: List[np.ndarray],
+    references: List[np.ndarray],
+    tokenizer,
+) -> Dict[str, float]:
+    """Decode token IDs and compute aggregated ROUGE scores."""
+    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+    decoded_refs = tokenizer.batch_decode(references, skip_special_tokens=True)
+
+    # Add newlines to help ROUGE handle sentence boundaries.
+    decoded_preds = [
+        "\n".join(pred.strip().split(".")) if pred.strip() else "empty"
+        for pred in decoded_preds
+    ]
+    decoded_refs = [
+        "\n".join(ref.strip().split(".")) if ref.strip() else "empty"
+        for ref in decoded_refs
+    ]
+
+    result = rouge_metric.compute(
+        predictions=decoded_preds,
+        references=decoded_refs,
+        use_stemmer=True,
+        use_aggregator=True,
+    )
+
+    return {
+        "rouge1": float(result["rouge1"]),
+        "rouge2": float(result["rouge2"]),
+        "rougeL": float(result["rougeL"]),
+        "rougeLsum": float(result["rougeLsum"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Manual trainer
+# ---------------------------------------------------------------------------
+
+class ManualTrainer:
+    """Minimal, transparent training loop for seq2seq finetuning."""
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        device: torch.device,
+        *,
+        learning_rate: float = 3e-4,
+        weight_decay: float = 0.01,
+        output_dir: Path,
+        use_mixed_precision: bool = True,
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: float = 1.0,
+        save_steps: int = 0,
+        eval_steps: int = 0,
+        logging_steps: int = 50,
+        max_target_length: int = 256,
+        max_eval_batches: Optional[int] = None,
+    ):
+        self.model = model.to(device)
+        self.tokenizer = tokenizer
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.gradient_accumulation_steps = max(1, gradient_accumulation_steps)
+        self.max_grad_norm = max_grad_norm
+        self.save_steps = max(0, save_steps)
+        self.eval_steps = max(0, eval_steps)
+        self.logging_steps = max(0, logging_steps)
+        self.max_target_length = max_target_length
+        self.max_eval_batches = max_eval_batches
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+
+        self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
+        self.scaler = GradScaler() if self.use_mixed_precision else None
+
+        self.global_step = 0
+        self.best_val_loss = float("inf")
+        self.best_rouge = 0.0
+        self.train_losses: List[float] = []
+        self.val_losses: List[float] = []
+        self.rouge_scores: List[Dict[str, float]] = []
+
+        print("\n" + "=" * 60)
+        print("🎯 Trainer Initialised")
+        print("=" * 60)
+        print(f"  Device: {device}")
+        print(f"  Mixed precision: {self.use_mixed_precision}")
+        print(f"  Learning rate: {learning_rate}")
+        print(f"  Weight decay: {weight_decay}")
+        print(f"  Gradient accumulation: {self.gradient_accumulation_steps}")
+        print(f"  Max grad norm: {self.max_grad_norm}")
+        print(f"  Eval every N steps: {self.eval_steps or 'epoch'}")
+        print(f"  Save every N steps: {self.save_steps or 'epoch'}")
+        print(f"  Logging every N steps: {self.logging_steps}")
+        print(f"  Output directory: {self.output_dir}")
+        print("=" * 60 + "\n")
+
+    # -----------------------------
+    # Training / evaluation helpers
+    # -----------------------------
+
+    def train_epoch(self, epoch: int) -> float:
+        self.model.train()
+        epoch_loss = 0.0
+        progress = tqdm(self.train_loader, desc=f"Epoch {epoch}", leave=False)
+        self.optimizer.zero_grad(set_to_none=True)
+
+        accumulation_counter = 0
+        for step, batch in enumerate(progress):
+            loss_value = self._forward_backward(batch)
+            epoch_loss += loss_value
+            accumulation_counter += 1
+
+            if accumulation_counter == self.gradient_accumulation_steps:
+                self._optimizer_step()
+                accumulation_counter = 0
+
+                # Optional step-based evaluation / saving
+                if self.eval_steps and self.global_step % self.eval_steps == 0:
+                    val_loss, rouge = self.validate()
+                    self.val_losses.append(val_loss)
+                    self.rouge_scores.append(rouge)
+                    if rouge["rougeLsum"] > self.best_rouge:
+                        self.best_rouge = rouge["rougeLsum"]
+                        self.save_checkpoint(epoch, val_loss, rouge, is_best=True)
+                    self.model.train()
+
+                if self.save_steps and self.global_step % self.save_steps == 0:
+                    self.save_checkpoint(epoch, None, None, is_best=False)
+
+            if self.logging_steps and (step + 1) % self.logging_steps == 0:
+                progress.set_postfix(loss=f"{loss_value:.4f}", step=self.global_step)
+
+        # Handle any leftover gradients
+        if accumulation_counter > 0:
+            self._optimizer_step()
+
+        avg_loss = epoch_loss / len(self.train_loader)
+        self.train_losses.append(avg_loss)
+        return avg_loss
+
+    def _forward_backward(self, batch: Dict[str, torch.Tensor]) -> float:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["labels"].to(self.device)
+
+        context = autocast if self.use_mixed_precision else nullcontext
+        with context():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs.loss / self.gradient_accumulation_steps
+
+        if self.use_mixed_precision:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        return loss.item() * self.gradient_accumulation_steps
+
+    def _optimizer_step(self) -> None:
+        if self.use_mixed_precision:
+            self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+        if self.use_mixed_precision:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
+
+        self.optimizer.zero_grad(set_to_none=True)
+        self.global_step += 1
+
+    @torch.no_grad()
+    def validate(self) -> (float, Dict[str, float]):
+        self.model.eval()
+        total_loss = 0.0
+        all_predictions: List[np.ndarray] = []
+        all_references: List[np.ndarray] = []
+
+        progress = tqdm(self.val_loader, desc="Validating", leave=False)
+        for batch_idx, batch in enumerate(progress):
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
+
+            context = autocast if self.use_mixed_precision else nullcontext
+            with context():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+            total_loss += outputs.loss.item()
+
+            generated = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=self.max_target_length,
+                num_beams=4,
+                early_stopping=True,
+            )
+
+            all_predictions.extend(generated.cpu().numpy())
+            labels_for_decode = labels.clone()
+            labels_for_decode[labels_for_decode == -100] = self.tokenizer.pad_token_id
+            all_references.extend(labels_for_decode.cpu().numpy())
+
+            progress.set_postfix(loss=f"{outputs.loss.item():.4f}")
+
+            if self.max_eval_batches and (batch_idx + 1) >= self.max_eval_batches:
+                break
+
+        denom = min(len(self.val_loader), batch_idx + 1) or 1
+        avg_loss = total_loss / denom
+        rouge = compute_rouge_metrics(all_predictions, all_references, self.tokenizer)
+        return avg_loss, rouge
+
+    def save_checkpoint(
+        self,
+        epoch: int,
+        val_loss: Optional[float],
+        rouge_scores: Optional[Dict[str, float]],
+        *,
+        is_best: bool,
+    ) -> None:
+        target_dir = self.output_dir / ("best_model" if is_best else f"checkpoint-step-{self.global_step}")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        self.model.save_pretrained(target_dir)
+        self.tokenizer.save_pretrained(target_dir)
+
+        state = {
+            "epoch": epoch,
+            "global_step": self.global_step,
+            "val_loss": val_loss,
+            "rouge_scores": rouge_scores,
+            "best_rouge": self.best_rouge,
+            "optimizer_state": self.optimizer.state_dict(),
+            "scaler_state": self.scaler.state_dict() if self.scaler else None,
+            "train_losses": self.train_losses,
+            "val_losses": self.val_losses,
+            "rouge_history": self.rouge_scores,
+        }
+        torch.save(state, target_dir / "training_state.pt")
+
+        tag = "🌟 New best" if is_best else "💾 Saved"
+        print(f"{tag} checkpoint → {target_dir}")
+
+    # -----------------------------
+    # Main entry point
+    # -----------------------------
+
+    def train(self, num_epochs: int) -> Dict[str, List[float]]:
+        print("\n" + "=" * 60)
+        print("🚀 Starting fine-tuning")
+        print("=" * 60)
+        print(f"  Epochs: {num_epochs}")
+        print(f"  Batches / epoch: {len(self.train_loader)}")
+        total_steps = (
+            num_epochs * len(self.train_loader) // self.gradient_accumulation_steps
+        )
+        print(f"  Total optimisation steps: {total_steps}")
+        print("=" * 60 + "\n")
+
+        start_time = time.time()
+
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.time()
+            train_loss = self.train_epoch(epoch)
+            val_loss, rouge = self.validate()
+            self.val_losses.append(val_loss)
+            self.rouge_scores.append(rouge)
+
+            if rouge["rougeLsum"] > self.best_rouge:
+                self.best_rouge = rouge["rougeLsum"]
+                self.save_checkpoint(epoch, val_loss, rouge, is_best=True)
+
+            self.save_checkpoint(epoch, val_loss, rouge, is_best=False)
+
+            elapsed = time.time() - epoch_start
+            print("\n" + "-" * 60)
+            print(f"Epoch {epoch} summary")
+            print("-" * 60)
+            print(f"  Train loss:   {train_loss:.4f}")
+            print(f"  Val loss:     {val_loss:.4f}")
+            print(f"  ROUGE-1:      {rouge['rouge1']:.4f}")
+            print(f"  ROUGE-2:      {rouge['rouge2']:.4f}")
+            print(f"  ROUGE-L:      {rouge['rougeL']:.4f}")
+            print(f"  ROUGE-Lsum:   {rouge['rougeLsum']:.4f}")
+            print(f"  Epoch time:   {elapsed:.2f}s")
+            print("-" * 60 + "\n")
+
+        total_time = time.time() - start_time
+        print("\n" + "=" * 60)
+        print("✅ Training complete")
+        print("=" * 60)
+        print(f"  Total time: {total_time / 60:.2f} minutes")
+        print(f"  Best ROUGE-Lsum: {self.best_rouge:.4f}")
+        print(f"  Final train loss: {self.train_losses[-1]:.4f}")
+        print(f"  Final val loss:   {self.val_losses[-1]:.4f}")
+        print("=" * 60 + "\n")
+
+        return {
+            "train_losses": self.train_losses,
+            "val_losses": self.val_losses,
+            "rouge_scores": self.rouge_scores,
+            "best_rouge": self.best_rouge,
+            "total_time": total_time,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Utilities for saving training summaries
+# ---------------------------------------------------------------------------
+
+def save_training_artifacts(
+    output_dir: Path,
+    args,
+    hardware_info: Dict[str, Optional[str]],
+    results: Dict[str, List[float]],
+    model,
+) -> None:
+    """Persist JSON + text summaries mirroring the manual trainer."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_payload = {
+        "hardware": hardware_info,
+        "hyperparameters": {
+            "model_name": args.model_name,
+            "use_lora": args.use_lora,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "max_grad_norm": args.max_grad_norm,
+            "max_source_length": args.max_source_length,
+            "max_target_length": args.max_target_length,
+            "seed": args.seed,
+        },
+        "results": {
+            "best_rouge_lsum": results["best_rouge"],
+            "final_train_loss": results["train_losses"][-1],
+            "final_val_loss": results["val_losses"][-1],
+            "total_time_minutes": results["total_time"] / 60,
+            "train_losses": results["train_losses"],
+            "val_losses": results["val_losses"],
+            "rouge_scores": results["rouge_scores"],
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    json_path = output_dir / "training_log.json"
+    with open(json_path, "w") as fh:
+        json.dump(log_payload, fh, indent=2)
+
+    report_path = output_dir / "training_report.txt"
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pct = 100 * trainable_params / total_params if total_params else 0.0
+
+    with open(report_path, "w") as fh:
+        fh.write("=" * 80 + "\n")
+        fh.write("FLAN-T5 LoRA Training Report\n")
+        fh.write("=" * 80 + "\n\n")
+
+        fh.write("Hardware Information\n")
+        fh.write("-" * 80 + "\n")
+        for key, value in hardware_info.items():
+            fh.write(f"  {key}: {value}\n")
+
+        fh.write("\nModel Configuration\n")
+        fh.write("-" * 80 + "\n")
+        fh.write(f"  Model: {args.model_name}\n")
+        fh.write(f"  LoRA Enabled: {args.use_lora}\n")
+        fh.write(f"  LoRA Rank: {args.lora_r}\n")
+        fh.write(f"  LoRA Alpha: {args.lora_alpha}\n")
+        fh.write(f"  LoRA Dropout: {args.lora_dropout}\n")
+        fh.write(f"  Total Parameters: {total_params:,}\n")
+        fh.write(f"  Trainable Parameters: {trainable_params:,}\n")
+        fh.write(f"  Trainable %: {pct:.2f}%\n")
+
+        fh.write("\nTraining Configuration\n")
+        fh.write("-" * 80 + "\n")
+        fh.write(f"  Epochs: {args.epochs}\n")
+        fh.write(f"  Batch Size: {args.batch_size}\n")
+        fh.write(f"  Gradient Accumulation Steps: {args.gradient_accumulation_steps}\n")
+        fh.write(f"  Effective Batch Size: {args.batch_size * args.gradient_accumulation_steps}\n")
+        fh.write(f"  Learning Rate: {args.learning_rate}\n")
+        fh.write(f"  Weight Decay: {args.weight_decay}\n")
+        fh.write(f"  Max Grad Norm: {args.max_grad_norm}\n")
+        fh.write(f"  Max Source Length: {args.max_source_length}\n")
+        fh.write(f"  Max Target Length: {args.max_target_length}\n")
+        fh.write(f"  Mixed Precision: {not args.no_mixed_precision}\n")
+        fh.write(f"  Random Seed: {args.seed}\n")
+
+        fh.write("\nTraining Results\n")
+        fh.write("-" * 80 + "\n")
+        fh.write(f"  Total Time: {results['total_time'] / 60:.2f} minutes\n")
+        fh.write(f"  Best ROUGE-Lsum: {results['best_rouge']:.4f}\n")
+        fh.write(f"  Final Train Loss: {results['train_losses'][-1]:.4f}\n")
+        fh.write(f"  Final Val Loss: {results['val_losses'][-1]:.4f}\n")
+        if results["rouge_scores"]:
+            final_rouge = results["rouge_scores"][-1]
+            fh.write(f"  Final ROUGE-1: {final_rouge['rouge1']:.4f}\n")
+            fh.write(f"  Final ROUGE-2: {final_rouge['rouge2']:.4f}\n")
+            fh.write(f"  Final ROUGE-L: {final_rouge['rougeL']:.4f}\n")
+            fh.write(f"  Final ROUGE-Lsum: {final_rouge['rougeLsum']:.4f}\n")
+
+        fh.write("\nLoss History\n")
+        fh.write("-" * 80 + "\n")
+        for idx, (train_loss, val_loss) in enumerate(
+            zip(results["train_losses"], results["val_losses"]), start=1
+        ):
+            fh.write(f"  Epoch {idx}: Train={train_loss:.4f}, Val={val_loss:.4f}\n")
+
+        if results["rouge_scores"]:
+            fh.write("\nROUGE History\n")
+            fh.write("-" * 80 + "\n")
+            for idx, score in enumerate(results["rouge_scores"], start=1):
+                fh.write(f"  Checkpoint {idx}: {score}\n")
+
+        fh.write("\nGenerated at: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        fh.write("=" * 80 + "\n")
+
+    print(f"📊 Training artefacts saved to {output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing & main entry
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Manual FLAN-T5 + LoRA training loop for BioLaySumm",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # Model / LoRA
+    parser.add_argument("--model_name", default="google/flan-t5-base")
+    parser.add_argument("--use_lora", action="store_true", default=True)
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.1)
+
+    # Data
+    parser.add_argument(
+        "--data_dir",
+        default="recognition/fineTuneRadiology_48543200/data",
+        help="Directory containing train.csv / val.csv",
+    )
+    parser.add_argument(
+        "--max_input_len",
+        dest="max_source_length",
+        type=int,
+        default=1024,
+        help="Alias retained from the Trainer script.",
+    )
+    parser.add_argument("--max_target_len", dest="max_target_length", type=int, default=256)
+    parser.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=None,
+        help="Override evaluation batch size (defaults to training batch size).",
+    )
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--subset",
+        type=int,
+        default=None,
+        help="Optional number of training samples for quick experiments.",
+    )
+
+    # Training hyperparameters
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--lr", dest="learning_rate", type=float, default=3e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--max_eval_batches", type=int, default=None)
+
+    # Logging & checkpointing
+    parser.add_argument("--output_dir", default="./outputs_flan_t5_lora")
+    parser.add_argument("--logging_steps", type=int, default=50)
+    parser.add_argument("--eval_steps", type=int, default=0)
+    parser.add_argument("--save_steps", type=int, default=0)
+    parser.add_argument(
+        "--eval_epoch",
+        action="store_true",
+        help="Evaluate only at epoch boundaries (overrides --eval_steps).",
+    )
+    parser.add_argument(
+        "--save_epoch",
+        action="store_true",
+        help="Save checkpoints only at epoch boundaries (overrides --save_steps).",
+    )
+
+    # Precision / reproducibility
+    parser.add_argument("--fp16", action="store_true", help="Hint to use fp16 mixed precision.")
+    parser.add_argument(
+        "--no_mixed_precision",
+        action="store_true",
+        help="Disable mixed precision even when a GPU is available.",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dry_run", action="store_true", help="Quick smoke test mode.")
+
+    return parser.parse_args()
+
+
+def prepare_dataloaders(args, tokenizer) -> (DataLoader, DataLoader):
+    data_dir = Path(args.data_dir)
+    train_csv = data_dir / "train.csv"
+    val_csv = data_dir / "val.csv"
+    if not train_csv.exists() or not val_csv.exists():
+        raise FileNotFoundError(
+            f"Expected train.csv and val.csv in {data_dir}. "
+            "Run data_setup.py to download the dataset."
+        )
+
+    train_dataset = RadiologyDataset(
+        csv_path=str(train_csv),
+        tokenizer=tokenizer,
+        max_source_length=args.max_source_length,
+        max_target_length=args.max_target_length,
+    )
+    val_dataset = RadiologyDataset(
+        csv_path=str(val_csv),
+        tokenizer=tokenizer,
+        max_source_length=args.max_source_length,
+        max_target_length=args.max_target_length,
+        prefix=train_dataset.prefix,
+    )
+
+    if args.subset:
+        subset_size = min(len(train_dataset), args.subset)
+        val_subset = max(1, subset_size // 10)
+        train_dataset = Subset(train_dataset, range(subset_size))
+        val_dataset = Subset(val_dataset, range(val_subset))
+        print(f"⚙️  Using subset: {subset_size} train samples / {val_subset} val samples")
+
+    if args.dry_run:
+        train_limit = min(len(train_dataset), 8)
+        val_limit = min(len(val_dataset), 4)
+        train_dataset = Subset(train_dataset, range(train_limit))
+        val_dataset = Subset(val_dataset, range(val_limit))
+        print("🧪 Dry-run mode: limiting to 8 train / 4 val samples")
+
+    pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+    )
+    eval_batch_size = args.eval_batch_size or args.batch_size
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=eval_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+    )
+    return train_loader, val_loader
 
 
 def main():
     args = parse_args()
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
-    # -----------------------------
-    # 1) Model + tokenizer
-    # -----------------------------
-    cfg = ModelConfig(model_name=args.model_name, use_lora=args.use_lora)
-    model, tokenizer, _ = load_model_and_tokenizer(cfg)
+    # Derived flags
+    if args.eval_epoch:
+        args.eval_steps = 0
+    if args.save_epoch:
+        args.save_steps = 0
 
-    # FIXED: Only enable gradient checkpointing if NOT using LoRA
-    if args.checkpointing:
-        if args.use_lora:
-            print(
-                "⚠️  WARNING: Gradient checkpointing is incompatible with LoRA.")
-            print("    Disabling checkpointing to avoid training errors.")
-            print(
-                "    To save VRAM: reduce batch_size or max_input_len instead.")
-        else:
-            print("🔁 Enabling gradient checkpointing")
-            model.gradient_checkpointing_enable()
+    if args.dry_run:
+        print("\n" + "=" * 60)
+        print("🧪 DRY-RUN MODE")
+        print("=" * 60)
+        args.epochs = 1
+        args.logging_steps = max(1, min(args.logging_steps, 5))
+        args.eval_steps = 0
+        args.save_steps = 0
+        print("  Adjusted epochs/logging for a quick smoke test.\n")
 
-    # -----------------------------
-    # 2) Data
-    # -----------------------------
-    raw = load_biolaysumm()
+    print("\n" + "=" * 60)
+    print("⚙️  Training Configuration")
+    print("=" * 60)
+    print(f"Model: {args.model_name}")
+    print(f"LoRA: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Max sequence lengths: input={args.max_source_length}, target={args.max_target_length}")
+    print("=" * 60 + "\n")
 
-    tokenized, input_col, target_col = build_tokenized(
-        raw,
-        tokenizer,
-        max_input_len=args.max_input_len,
-        max_target_len=args.max_target_len,
+    set_seed(args.seed)
+    hardware = get_hardware_info()
+    print_hardware_info(hardware)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_mixed_precision = not args.no_mixed_precision and (device.type == "cuda")
+    if args.fp16 and device.type == "cuda":
+        use_mixed_precision = True
+
+    print("📚 Loading model + tokenizer...")
+    cfg = ModelConfig(
+        model_name=args.model_name,
+        use_lora=args.use_lora,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
     )
+    model, tokenizer, _ = load_model_and_tokenizer(cfg, move_to_device=False)
+    print_model_info(model)
 
-    # OPTIONAL SUBSET for fast iteration
-    if args.subset is not None:
-        n_train = min(args.subset, len(tokenized["train"]))
-        n_val = max(1, args.subset // 10)
-        n_val = min(n_val, len(tokenized["validation"]))
+    print(f"\n📂 Building dataloaders from {args.data_dir}")
+    train_loader, val_loader = prepare_dataloaders(args, tokenizer)
 
-        print(f"⚙️ Using subset: {n_train} train / {n_val} val (from full "
-              f"{len(tokenized['train'])} / {len(tokenized['validation'])})")
-
-        tokenized_train = tokenized["train"].select(range(n_train))
-        tokenized_val = tokenized["validation"].select(range(n_val))
-    else:
-        tokenized_train = tokenized["train"]
-        tokenized_val = tokenized["validation"]
-
-    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
-
-    # -----------------------------
-    # 3) Metrics (ROUGE-1/2/L/Lsum)
-    # -----------------------------
-    rouge = evaluate.load("rouge")
-
-    def compute_metrics(eval_pred):
-        preds, labels = eval_pred
-        if isinstance(preds, tuple):
-            preds = preds[0]
-
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_labels = tokenizer.batch_decode(labels,
-                                                skip_special_tokens=True)
-
-        results = rouge.compute(
-            predictions=decoded_preds,
-            references=decoded_labels,
-            use_stemmer=True,
-        )
-        gen_lens = [np.count_nonzero(p != tokenizer.pad_token_id) for p in
-                    preds]
-        results["gen_len"] = float(np.mean(gen_lens))
-        return {k: round(v, 4) for k, v in results.items()}
-
-    # -----------------------------
-    # 4) Trainer / TrainingArguments
-    # -----------------------------
-
-    eval_strategy = "epoch" if args.eval_epoch else "steps"
-    save_strategy = "epoch" if args.save_epoch else "steps"
-
-    use_fp16 = args.fp16 or torch.cuda.is_available()
-
-    # Debug: Print dataset sizes
-    print(f"📊 Training samples: {len(tokenized_train)}")
-    print(f"📊 Validation samples: {len(tokenized_val)}")
-    print(f"📊 Steps per epoch: {len(tokenized_train) // args.batch_size}")
-    print(
-        f"📊 Total training steps: {(len(tokenized_train) // args.batch_size) * args.epochs}")
-
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=args.output_dir,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        learning_rate=args.lr,
-        num_train_epochs=args.epochs,
-
-        # logging / eval / save
-        evaluation_strategy=eval_strategy,
-        save_strategy=save_strategy,
-        eval_steps=args.eval_steps if eval_strategy == "steps" else None,
-        save_steps=args.save_steps if save_strategy == "steps" else None,
-        logging_steps=args.logging_steps,
-
-        # generation config for eval
-        predict_with_generate=True,
-        generation_max_length=args.max_target_len,
-        generation_num_beams=4,
-
-        # stability / perf
-        fp16=False,
-        warmup_ratio=args.warmup_ratio,
-        load_best_model_at_end=True,
-        metric_for_best_model="rougeLsum",
-        greater_is_better=True,
-
-        # misc / reporting
-        report_to=["none"],
-        save_total_limit=2,
-    )
-
-    trainer = Seq2SeqTrainer(
+    trainer = ManualTrainer(
         model=model,
-        args=training_args,
-        train_dataset=tokenized_train,
-        eval_dataset=tokenized_val,
         tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        output_dir=Path(args.output_dir),
+        use_mixed_precision=use_mixed_precision,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_grad_norm=args.max_grad_norm,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
+        logging_steps=args.logging_steps,
+        max_target_length=args.max_target_length,
+        max_eval_batches=args.max_eval_batches,
     )
 
-    # -----------------------------
-    # 5) Train + evaluate
-    # -----------------------------
-    print("✅ Training setup complete — starting fine-tuning...")
-    trainer.train()
-    print("🏁 Training done, running final eval on validation split...")
-    eval_metrics = trainer.evaluate()
-    print("Final eval metrics:", eval_metrics)
+    results = trainer.train(num_epochs=args.epochs)
+    save_training_artifacts(Path(args.output_dir), args, hardware, results, model)
 
-    # -----------------------------
-    # 6) Save model + tokenizer + results text
-    # -----------------------------
-    trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(os.path.join(args.output_dir, "RESULTS.txt"), "w") as f:
-        for k, v in eval_metrics.items():
-            f.write(f"{k}: {v}\n")
-
-    print(f"📦 Saved model + tokenizer + RESULTS.txt to {args.output_dir}")
+    print("\n✅ Training complete! Check the output directory for artefacts and checkpoints.")
 
 
 if __name__ == "__main__":
