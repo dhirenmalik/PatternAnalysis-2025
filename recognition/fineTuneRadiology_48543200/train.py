@@ -356,12 +356,21 @@ class ManualTrainer:
             )
             loss = outputs.loss / self.gradient_accumulation_steps
 
-        if self.use_mixed_precision:
+        loss_value_tensor = loss.detach()
+        loss_value = float(loss_value_tensor.item())
+        if not torch.isfinite(loss_value_tensor):
+            print("⚠️  Encountered non-finite loss; skipping backward step.")
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.use_mixed_precision and self.scaler is not None:
+                self.scaler.update()
+            return loss_value
+
+        if self.use_mixed_precision and self.scaler is not None:
             self.scaler.scale(loss).backward()
         else:
             loss.backward()
 
-        return loss.item() * self.gradient_accumulation_steps
+        return loss_value * self.gradient_accumulation_steps
 
     def _optimizer_step(self) -> None:
         """Apply accumulated gradients and advance the optimiser state."""
