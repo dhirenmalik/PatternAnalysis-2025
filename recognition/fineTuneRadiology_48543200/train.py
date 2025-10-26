@@ -243,7 +243,7 @@ class ManualTrainer:
 
         self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
         self.scaler = (
-            torch.amp.GradScaler(device_type=device.type)
+            torch.amp.GradScaler(device=device.type)
             if self.use_mixed_precision
             else None
         )
