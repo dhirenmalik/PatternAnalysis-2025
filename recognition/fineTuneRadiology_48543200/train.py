@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import time
@@ -261,6 +262,8 @@ class ManualTrainer:
         self.train_losses: List[float] = []
         self.val_losses: List[float] = []
         self.rouge_scores: List[Dict[str, float]] = []
+        self.step_losses: List[float] = []
+        self.lr_history: List[float] = []
 
         print("\n" + "=" * 60)
         print("🎯 Trainer Initialised")
@@ -296,9 +299,13 @@ class ManualTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         accumulation_counter = 0
+        finite_batches = 0
         for step, batch in enumerate(progress):
             loss_value = self._forward_backward(batch)
-            epoch_loss += loss_value
+            if math.isfinite(loss_value):
+                self.step_losses.append(loss_value)
+                epoch_loss += loss_value
+                finite_batches += 1
             accumulation_counter += 1
 
             if accumulation_counter == self.gradient_accumulation_steps:
@@ -325,7 +332,9 @@ class ManualTrainer:
         if accumulation_counter > 0:
             self._optimizer_step()
 
-        avg_loss = epoch_loss / len(self.train_loader)
+        denom = finite_batches if finite_batches > 0 else len(self.train_loader)
+        denom = max(1, denom)
+        avg_loss = epoch_loss / denom
         self.train_losses.append(avg_loss)
         return avg_loss
 
@@ -386,6 +395,7 @@ class ManualTrainer:
 
         self.optimizer.zero_grad(set_to_none=True)
         self.global_step += 1
+        self.lr_history.append(self.optimizer.param_groups[0]["lr"])
 
     @torch.no_grad()
     def validate(self) -> (float, Dict[str, float]):
@@ -549,6 +559,8 @@ class ManualTrainer:
             "rouge_scores": self.rouge_scores,
             "best_rouge": self.best_rouge,
             "total_time": total_time,
+            "step_losses": self.step_losses,
+            "lr_history": self.lr_history,
         }
 
 
@@ -560,7 +572,7 @@ def save_training_artifacts(
     output_dir: Path,
     args,
     hardware_info: Dict[str, Optional[str]],
-    results: Dict[str, List[float]],
+    results: Dict[str, Any],
     model,
 ) -> None:
     """Persist JSON and text summaries mirroring the manual trainer.
@@ -597,9 +609,11 @@ def save_training_artifacts(
             "final_train_loss": results["train_losses"][-1],
             "final_val_loss": results["val_losses"][-1],
             "total_time_minutes": results["total_time"] / 60,
-            "train_losses": results["train_losses"],
-            "val_losses": results["val_losses"],
+            "train_losses": [float(x) for x in results["train_losses"]],
+            "val_losses": [float(x) for x in results["val_losses"]],
             "rouge_scores": results["rouge_scores"],
+            "step_losses": [float(x) for x in results.get("step_losses", [])],
+            "lr_history": [float(x) for x in results.get("lr_history", [])],
         },
         "timestamp": datetime.now().isoformat(),
     }
@@ -689,7 +703,7 @@ def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Loss curves
+    # Per-epoch loss curves
     loss_path = output_dir / "loss_curve.png"
     if results.get("train_losses"):
         epochs = range(1, len(results["train_losses"]) + 1)
@@ -706,6 +720,21 @@ def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
         plt.savefig(loss_path)
         plt.close()
         print(f"📉 Saved loss curve to {loss_path}")
+
+    # Per-batch loss curve
+    step_losses = [x for x in results.get("step_losses", []) if math.isfinite(x)]
+    if step_losses:
+        batch_loss_path = output_dir / "batch_loss_curve.png"
+        plt.figure(figsize=(8, 5))
+        plt.plot(range(1, len(step_losses) + 1), step_losses, linewidth=1)
+        plt.xlabel("Batch Step")
+        plt.ylabel("Loss")
+        plt.title("Batch-wise Training Loss")
+        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(batch_loss_path)
+        plt.close()
+        print(f"📉 Saved batch loss curve to {batch_loss_path}")
 
     # ROUGE curves
     rouge_scores = results.get("rouge_scores") or []
@@ -726,6 +755,21 @@ def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
         plt.savefig(rouge_path)
         plt.close()
         print(f"📈 Saved ROUGE curves to {rouge_path}")
+
+    # Learning rate curve
+    lr_history = [x for x in results.get("lr_history", []) if math.isfinite(x)]
+    if lr_history:
+        lr_path = output_dir / "learning_rate_curve.png"
+        plt.figure(figsize=(8, 5))
+        plt.plot(range(1, len(lr_history) + 1), lr_history, linewidth=1)
+        plt.xlabel("Optimizer Step")
+        plt.ylabel("Learning Rate")
+        plt.title("Learning Rate Schedule")
+        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(lr_path)
+        plt.close()
+        print(f"📈 Saved learning rate curve to {lr_path}")
 
 
 # ---------------------------------------------------------------------------
