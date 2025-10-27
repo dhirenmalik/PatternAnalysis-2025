@@ -294,6 +294,8 @@ class ManualTrainer:
         self.step_losses: List[float] = []
         self.lr_history: List[float] = []
         self._scaled_this_step = False
+        self.nan_streak = 0
+        self._auto_disabled_amp = False
 
         print("\n" + "=" * 60)
         print("🎯 Trainer Initialised")
@@ -341,6 +343,22 @@ class ManualTrainer:
                 self.step_losses.append(loss_value)
                 epoch_loss += loss_value
                 finite_batches += 1
+                self.nan_streak = 0
+            else:
+                self.nan_streak += 1
+                if (
+                    self.use_mixed_precision
+                    and self.scaler is not None
+                    and not self._auto_disabled_amp
+                    and self.nan_streak >= 8
+                ):
+                    print(
+                        "⚠️  Repeated non-finite losses detected. Automatically "
+                        "disabling mixed precision for stability."
+                    )
+                    self.use_mixed_precision = False
+                    self.scaler = None
+                    self._auto_disabled_amp = True
             accumulation_counter += 1
 
             if accumulation_counter == self.gradient_accumulation_steps:
