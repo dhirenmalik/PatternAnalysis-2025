@@ -26,6 +26,9 @@ def print_header(title: str) -> None:
 
     Args:
         title: Text to display in the header block.
+
+    Returns:
+        None. Output is printed directly to stdout.
     """
     print(f"\n{SECTION}\n{title:^70}\n{SECTION}")
 
@@ -35,6 +38,9 @@ def print_section(title: str) -> None:
 
     Args:
         title: The section title to print.
+
+    Returns:
+        None. Output is printed directly to stdout.
     """
     print(f"\n{SUBSECTION}\n{title}\n{SUBSECTION}")
 
@@ -57,7 +63,11 @@ def preview(series: pd.Series, width: int = 80) -> str:
 
 
 def main() -> None:
-    """Download, clean, and export BioLaySumm2025 splits."""
+    """Download, clean, and export BioLaySumm2025 splits.
+
+    Returns:
+        None. Entry point handles file system side effects.
+    """
     output_dir = Path(CONFIG.data_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

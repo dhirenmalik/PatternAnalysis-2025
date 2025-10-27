@@ -25,7 +25,15 @@ CANDIDATE_TARGET_KEYS: Tuple[str, ...] = (
 
 
 def _guess_column(names: Sequence[str], candidates: Sequence[str]) -> str:
-    """Pick the first matching column regardless of letter casing."""
+    """Pick the first column that matches one of the candidate names.
+
+    Args:
+        names: Sequence of available column names in the dataset.
+        candidates: Ordered list of preferred column names.
+
+    Returns:
+        The first matching name (case-insensitive) or the first column if none match.
+    """
     names_lower = [col.lower() for col in names]
     for candidate in candidates:
         if candidate.lower() in names_lower:
@@ -66,7 +74,20 @@ def build_tokenized(
     target_col: Optional[str] = None,
     add_prefix: str = "summarize radiology: ",
 ) -> Tuple[DatasetDict, str, str]:
-    """Tokenise splits using Hugging Face's mapping helpers."""
+    """Tokenise a DatasetDict using Hugging Face's mapping helpers.
+
+    Args:
+        raw: Original dataset splits as returned by ``load_biolaysumm``.
+        tokenizer: Tokenizer used to encode inputs and targets.
+        max_input_len: Maximum encoder sequence length.
+        max_target_len: Maximum decoder sequence length.
+        input_col: Optional override for the source column name.
+        target_col: Optional override for the target column name.
+        add_prefix: Prompt prepended to each source example before tokenisation.
+
+    Returns:
+        Tuple of (tokenised dataset, resolved input column name, resolved target column name).
+    """
     sample = raw["train"].features
     cols = list(sample.keys())
     input_col = input_col or _guess_column(cols, CANDIDATE_INPUT_KEYS)
@@ -75,6 +96,14 @@ def build_tokenized(
     print(f"🔍 Using columns: input='{input_col}' | target='{target_col}'")
 
     def preprocess(batch):
+        """Tokenise a mini-batch using the configured tokenizer.
+
+        Args:
+            batch: Batch dictionary sourced from the raw dataset.
+
+        Returns:
+            Mapping of model input tensors including labels.
+        """
         sources = [add_prefix + s for s in batch[input_col]]
         model_inputs = tokenizer(
             sources,
@@ -118,6 +147,9 @@ class RadiologyDataset(Dataset):
             max_source_length: Maximum sequence length for encoder-side text.
             max_target_length: Maximum sequence length for decoder targets.
             prefix: Task prompt prepended to each source example.
+
+        Returns:
+            None. Initialises dataset state for subsequent indexing.
         """
         self.data = pd.read_csv(csv_path)
         self.tokenizer = tokenizer
@@ -128,7 +160,11 @@ class RadiologyDataset(Dataset):
         print(f"✅ Loaded {len(self.data)} samples from {Path(csv_path).name}")
 
     def __len__(self) -> int:
-        """Return the number of rows available in the dataset."""
+        """Return the number of rows available in the dataset.
+
+        Returns:
+            Dataset length in samples.
+        """
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:

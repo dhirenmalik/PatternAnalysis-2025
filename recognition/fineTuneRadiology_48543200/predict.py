@@ -48,7 +48,15 @@ ROUGE_METRIC = evaluate.load("rouge")
 
 
 def load_model(checkpoint_path: str, device: torch.device):
-    """Load checkpoint via predict_single utilities."""
+    """Load a checkpoint via the single-example helper and log model stats.
+
+    Args:
+        checkpoint_path: Directory containing the trained weights.
+        device: Torch device that should host the model.
+
+    Returns:
+        Tuple of (model, tokenizer) ready for inference.
+    """
 
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
@@ -120,7 +128,15 @@ def prepare_csv_dataloader(
 
 
 def _resolve_raw_example(dataset, idx: int) -> Tuple[str, str, str]:
-    """Return raw report text, reference summary, and prefix for a dataset index."""
+    """Return raw input text, reference summary, and prefix for a dataset index.
+
+    Args:
+        dataset: `RadiologyDataset` or `Subset` wrapping it.
+        idx: Zero-based index in the loader iteration order.
+
+    Returns:
+        Tuple with (report_text, lay_summary, prefix).
+    """
 
     if isinstance(dataset, Subset):
         base_idx = dataset.indices[idx]
@@ -156,6 +172,9 @@ def generate_predictions(
         tokenizer: Tokenizer for decoding predictions and inputs.
         dataloader: Loader that yields batches from the evaluation split.
         device: Device on which inference runs.
+        prompt_prefix: Optional override for the dataset prefix. If ``None`` the
+            dataset-specified prefix is used.
+        max_source_length: Truncation length for encoder inputs.
         max_length: Maximum generation length.
         num_beams: Beam search width.
         no_repeat_ngram_size: Prevents repeating n-grams during generation.
@@ -245,6 +264,8 @@ def evaluate_hf_subset(
         max_input_len: Maximum encoder length.
         max_target_len: Maximum decoder length.
         num_samples: Number of validation samples to evaluate.
+        num_beams: Beam search width for generation.
+        no_repeat_ngram_size: Prevents repeating n-grams during generation.
         split: Dataset split to evaluate (defaults to ``validation``).
 
     Returns:
@@ -303,6 +324,9 @@ def print_examples(
         references: Ground-truth summaries aligned with ``predictions``.
         inputs: Source radiology reports corresponding to each prediction.
         num_examples: Maximum number of examples to display.
+
+    Returns:
+        None. Examples are printed to stdout.
     """
     if not predictions:
         print("\n⚠️  No predictions available to display.")
@@ -340,6 +364,9 @@ def save_results(
         inputs: Original radiology report texts.
         rouge_scores: ROUGE metric results keyed by metric name.
         output_dir: Directory where artefacts are written.
+
+    Returns:
+        None. Generates artefact files on disk.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -381,6 +408,9 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
     Args:
         checkpoint_path: Directory that owns ``RESULTS.txt``.
         rouge_scores: ROUGE metric values to append.
+
+    Returns:
+        None. Appends text to ``RESULTS.txt`` if scores are provided.
     """
     if not rouge_scores:
         return
@@ -397,7 +427,11 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line options for evaluation."""
+    """Parse command-line options for batched evaluation.
+
+    Returns:
+        Parsed command-line arguments.
+    """
     eval_defaults = EvalParams()
     data_defaults = DataParams()
     device_defaults = DeviceParams()
@@ -485,7 +519,11 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Entry point for evaluation and reporting."""
+    """Entry point for batched evaluation and reporting.
+
+    Returns:
+        None. This function orchestrates I/O side effects.
+    """
     args = parse_args()
 
     device = resolve_single_device(args.device)

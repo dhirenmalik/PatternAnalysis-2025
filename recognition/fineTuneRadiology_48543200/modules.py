@@ -164,6 +164,9 @@ def print_model_info(model: torch.nn.Module) -> None:
 
     Args:
         model: Model whose parameters should be summarised.
+
+    Returns:
+        None. Details are printed to stdout.
     """
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

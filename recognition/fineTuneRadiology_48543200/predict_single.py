@@ -21,6 +21,15 @@ os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 
 def resolve_device(choice: str) -> torch.device:
+    """Return an appropriate torch device for inference.
+
+    Args:
+        choice: Device preference (`auto`, `cuda`, `mps`, or `cpu`).
+
+    Returns:
+        Torch device that should host the model and inputs.
+    """
+
     if choice == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")
@@ -48,7 +57,16 @@ def resolve_device(choice: str) -> torch.device:
 def load_checkpoint(
     checkpoint_path: Path, device: torch.device
 ) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase]:
-    """Load a checkpoint, merging LoRA adapters if necessary."""
+    """Load a checkpoint, merging LoRA adapters if necessary.
+
+    Args:
+        checkpoint_path: Directory that stores the trained weights or adapters.
+        device: Torch device onto which the model should be moved.
+
+    Returns:
+        Tuple of the loaded model (in evaluation mode) and the tokenizer.
+    """
+
     checkpoint_path = checkpoint_path.expanduser().resolve()
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
@@ -63,8 +81,7 @@ def load_checkpoint(
         tokenizer = load_tokenizer(base_name)
         base_model = AutoModelForSeq2SeqLM.from_pretrained(base_name)
         model = PeftModel.from_pretrained(base_model, checkpoint_path)
-        # For single inference, merge adapters for speed.
-        model = model.merge_and_unload()
+        model = model.merge_and_unload()  # merge LoRA adapters for inference speed
 
     model = model.to(device).eval()
     print_model_info(model)
@@ -81,6 +98,22 @@ def predict_single(
     num_beams: int,
     no_repeat_ngram_size: int = 0,
 ) -> str:
+    """Generate a summary for a single prompt using beam search.
+
+    Args:
+        model: Autoregressive seq2seq model already loaded on `device`.
+        tokenizer: Tokenizer matched to the model vocabulary.
+        device: Torch device used for inference.
+        prompt: Text fed into the encoder, usually prefix + report.
+        max_input_len: Maximum number of tokens allowed for the input prompt.
+        max_target_len: Maximum number of tokens to decode.
+        num_beams: Beam search width.
+        no_repeat_ngram_size: Optional n-gram constraint for diversity.
+
+    Returns:
+        Decoded summary string.
+    """
+
     inputs = tokenizer(
         prompt,
         max_length=max_input_len,
@@ -91,16 +124,22 @@ def predict_single(
     with torch.no_grad():
         generated = model.generate(
             **inputs,
-        max_length=max_target_len,
-        num_beams=num_beams,
-        no_repeat_ngram_size=no_repeat_ngram_size,
-        early_stopping=True,
+            max_length=max_target_len,
+            num_beams=num_beams,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            early_stopping=True,
         )
 
     return tokenizer.decode(generated[0], skip_special_tokens=True)
 
 
 def parse_args() -> argparse.Namespace:
+    """Construct and parse CLI arguments for single-example inference.
+
+    Returns:
+        Parsed command-line arguments.
+    """
+
     data_defaults = DataParams()
     device_defaults = DeviceParams()
     eval_defaults = EvalParams()
@@ -143,6 +182,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Entry point for one-off summary generation from the command line.
+
+    Returns:
+        None. Outputs are printed directly to stdout.
+    """
+
     args = parse_args()
     device = resolve_device(args.device)
     print(f"🖥️  Using {device.type.upper()} for inference.")
