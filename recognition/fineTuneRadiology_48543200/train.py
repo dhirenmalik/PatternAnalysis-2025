@@ -574,6 +574,8 @@ def save_training_artifacts(
     hardware_info: Dict[str, Optional[str]],
     results: Dict[str, Any],
     model,
+    *,
+    use_lora: bool,
 ) -> None:
     """Persist JSON and text summaries mirroring the manual trainer.
 
@@ -590,7 +592,7 @@ def save_training_artifacts(
         "hardware": hardware_info,
         "hyperparameters": {
             "model_name": args.model_name,
-            "use_lora": args.use_lora,
+            "use_lora": use_lora,
             "lora_r": args.lora_r,
             "lora_alpha": args.lora_alpha,
             "lora_dropout": args.lora_dropout,
@@ -640,7 +642,7 @@ def save_training_artifacts(
         fh.write("\nModel Configuration\n")
         fh.write("-" * 80 + "\n")
         fh.write(f"  Model: {args.model_name}\n")
-        fh.write(f"  LoRA Enabled: {args.use_lora}\n")
+        fh.write(f"  LoRA Enabled: {use_lora}\n")
         fh.write(f"  LoRA Rank: {args.lora_r}\n")
         fh.write(f"  LoRA Alpha: {args.lora_alpha}\n")
         fh.write(f"  LoRA Dropout: {args.lora_dropout}\n")
@@ -789,7 +791,11 @@ def parse_args() -> argparse.Namespace:
 
     # Model / LoRA
     parser.add_argument("--model_name", default="google/flan-t5-base")
-    parser.add_argument("--use_lora", action="store_true", default=True)
+    parser.add_argument(
+        "--no_lora",
+        action="store_true",
+        help="Disable LoRA adapters and fine-tune all model parameters.",
+    )
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
@@ -951,7 +957,10 @@ def main():
     print("⚙️  Training Configuration")
     print("=" * 60)
     print(f"Model: {args.model_name}")
-    print(f"LoRA: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+    use_lora = not args.no_lora
+    print(
+        f"LoRA enabled: {use_lora} | r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}"
+    )
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
@@ -981,7 +990,7 @@ def main():
     print("📚 Loading model + tokenizer...")
     cfg = ModelConfig(
         model_name=args.model_name,
-        use_lora=args.use_lora,
+        use_lora=use_lora,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -1012,7 +1021,9 @@ def main():
     )
 
     results = trainer.train(num_epochs=args.epochs)
-    save_training_artifacts(Path(args.output_dir), args, hardware, results, model)
+    save_training_artifacts(
+        Path(args.output_dir), args, hardware, results, model, use_lora=use_lora
+    )
     save_training_plots(Path(args.output_dir), results)
 
     print("\n✅ Training complete! Check the output directory for artefacts and checkpoints.")
