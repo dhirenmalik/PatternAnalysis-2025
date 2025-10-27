@@ -25,9 +25,9 @@ We fine-tune the encoder–decoder language model **FLAN-T5 base** with paramete
 
 ```
 DATASET: BioLaySumm/BioLaySumm2025-LaymanRRG-opensource-track
-BASE MODEL: google/flan-t5-base (≈250M params, adapters train ≈1.8M)
+BASE MODEL: google/flan-t5-base → 247,577,856 parameters (LoRA trainable: 1,769,472 ≈ 0.71%)
 DEFAULT TRAIN CONFIG: epochs=3, batch_size=4, lr=3e-4, cosine scheduler (warmup 3%)
-TRAIN SPLIT: 150,454 | VAL: 10,000 | TEST: ???  (fill once confirmed)
+TRAIN SPLIT: 150,454 | VAL: 10,000 | TEST: ___ (fill once confirmed)
 ```
 
 ---
@@ -63,6 +63,8 @@ Reproducibility: training seeds defaults to 42; set `--seed` if you need a diffe
 ---
 
 ## Usage
+
+> **Defaults:** Unless overridden, `train.py` enables LoRA, mixed precision (on CUDA), and a cosine learning-rate schedule with 3% warm-up. Use `--scheduler none` or `--no_lora` to opt out.
 
 ### Training (default LoRA fine-tune)
 
@@ -164,6 +166,7 @@ Evaluation runs produce:
 |--------|---------|---------|---------|-------------|
 | *val (subset 4k)* | 0.5796  | 0.3481  | 0.5144  | 0.5428 |
 | *validation (HF 256 samples)* | 0.5790  | 0.3368  | 0.5046  | 0.5392 |
+| *val (subset 2k, cosine dry-run)* | 0.5217 | 0.2776 | 0.4548 | 0.4825 |
 
 *(Update table once full runs complete.)*
 
