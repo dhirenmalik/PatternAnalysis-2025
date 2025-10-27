@@ -79,6 +79,7 @@ def predict_single(
     max_input_len: int,
     max_target_len: int,
     num_beams: int,
+    no_repeat_ngram_size: int = 0,
 ) -> str:
     inputs = tokenizer(
         prompt,
@@ -90,9 +91,10 @@ def predict_single(
     with torch.no_grad():
         generated = model.generate(
             **inputs,
-            max_length=max_target_len,
-            num_beams=num_beams,
-            early_stopping=True,
+        max_length=max_target_len,
+        num_beams=num_beams,
+        no_repeat_ngram_size=no_repeat_ngram_size,
+        early_stopping=True,
         )
 
     return tokenizer.decode(generated[0], skip_special_tokens=True)
@@ -127,6 +129,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_target_len", type=int, default=hp_defaults.max_target_len)
     parser.add_argument("--num_beams", type=int, default=eval_defaults.num_beams)
     parser.add_argument(
+        "--no_repeat_ngram_size",
+        type=int,
+        default=0,
+        help="Set > 0 to prohibit repeating n-grams during generation.",
+    )
+    parser.add_argument(
         "--device",
         choices=["auto", "cuda", "mps", "cpu"],
         default=device_defaults.preferred_device,
@@ -151,6 +159,7 @@ def main() -> None:
         max_input_len=args.max_input_len,
         max_target_len=args.max_target_len,
         num_beams=args.num_beams,
+        no_repeat_ngram_size=args.no_repeat_ngram_size,
     )
 
     print("\n=== Prediction ===")
