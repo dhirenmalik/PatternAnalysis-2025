@@ -25,8 +25,8 @@ class HyperParams:
     save_epoch: bool = True
     subset: Optional[int] = None
     mixed_precision: bool = True
-    warmup_ratio: float = 0.0
-    scheduler_type: Optional[str] = None
+    warmup_ratio: float = 0.03
+    scheduler_type: Optional[str] = "cosine"
     scheduler_params: Dict[str, float] = field(default_factory=dict)
 
 

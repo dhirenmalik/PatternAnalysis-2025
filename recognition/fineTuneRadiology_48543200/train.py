@@ -19,6 +19,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import evaluate
+from transformers import get_scheduler
 
 from dataset import RadiologyDataset
 from modules import ModelConfig, load_model_and_tokenizer, print_model_info
@@ -209,6 +210,9 @@ class ManualTrainer:
         logging_steps: int = 50,
         max_target_length: int = 256,
         max_eval_batches: Optional[int] = None,
+        total_training_steps: int = 0,
+        scheduler_type: Optional[str] = None,
+        warmup_ratio: float = 0.0,
     ):
         """Initialise trainer state and optimiser configuration.
 
@@ -246,6 +250,9 @@ class ManualTrainer:
         self.logging_steps = max(0, logging_steps)
         self.max_target_length = max_target_length
         self.max_eval_batches = max_eval_batches
+        self.total_training_steps = max(1, total_training_steps)
+        self.scheduler_type = scheduler_type.lower() if scheduler_type else None
+        self.warmup_ratio = max(0.0, warmup_ratio)
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
@@ -254,6 +261,27 @@ class ManualTrainer:
         self.scaler = (
             torch.amp.GradScaler(device=device.type)
             if self.use_mixed_precision
+            else None
+        )
+        if self.scheduler_type and self.scheduler_type not in {
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+        }:
+            raise ValueError(f"Unsupported scheduler type: {self.scheduler_type}")
+        warmup_steps = int(self.total_training_steps * self.warmup_ratio)
+        warmup_steps = max(0, warmup_steps)
+        self.scheduler = (
+            get_scheduler(
+                name=self.scheduler_type,
+                optimizer=self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=self.total_training_steps,
+            )
+            if self.scheduler_type
             else None
         )
 
@@ -278,6 +306,11 @@ class ManualTrainer:
         print(f"  Eval every N steps: {self.eval_steps or 'epoch'}")
         print(f"  Save every N steps: {self.save_steps or 'epoch'}")
         print(f"  Logging every N steps: {self.logging_steps}")
+        scheduler_label = self.scheduler_type or "none"
+        print(
+            f"  Scheduler: {scheduler_label} | warmup ratio: {self.warmup_ratio:.3f}"
+        )
+        print(f"  Total optimisation steps: {self.total_training_steps}")
         print(f"  Output directory: {self.output_dir}")
         print("=" * 60 + "\n")
 
@@ -394,9 +427,15 @@ class ManualTrainer:
         else:
             self.optimizer.step()
 
+        if self.scheduler is not None:
+            self.scheduler.step()
+            current_lr = self.scheduler.get_last_lr()[0]
+        else:
+            current_lr = self.optimizer.param_groups[0]["lr"]
+
         self.optimizer.zero_grad(set_to_none=True)
         self.global_step += 1
-        self.lr_history.append(self.optimizer.param_groups[0]["lr"])
+        self.lr_history.append(current_lr)
 
     @torch.no_grad()
     def validate(self) -> (float, Dict[str, float]):
@@ -562,6 +601,9 @@ class ManualTrainer:
             "total_time": total_time,
             "step_losses": self.step_losses,
             "lr_history": self.lr_history,
+            "scheduler_type": self.scheduler_type or "none",
+            "warmup_ratio": self.warmup_ratio,
+            "total_training_steps": self.total_training_steps,
         }
 
 
@@ -606,6 +648,8 @@ def save_training_artifacts(
             "max_source_length": args.max_source_length,
             "max_target_length": args.max_target_length,
             "seed": args.seed,
+            "learning_rate_scheduler": results.get("scheduler_type", getattr(args, "scheduler", "none")),
+            "warmup_ratio": results.get("warmup_ratio", getattr(args, "warmup_ratio", 0.0)),
         },
         "results": {
             "best_rouge_lsum": results["best_rouge"],
@@ -617,6 +661,9 @@ def save_training_artifacts(
             "rouge_scores": results["rouge_scores"],
             "step_losses": [float(x) for x in results.get("step_losses", [])],
             "lr_history": [float(x) for x in results.get("lr_history", [])],
+            "scheduler_type": results.get("scheduler_type", "none"),
+            "warmup_ratio": results.get("warmup_ratio", 0.0),
+            "total_training_steps": results.get("total_training_steps", 0),
         },
         "timestamp": datetime.now().isoformat(),
     }
@@ -650,6 +697,9 @@ def save_training_artifacts(
         fh.write(f"  Total Parameters: {total_params:,}\n")
         fh.write(f"  Trainable Parameters: {trainable_params:,}\n")
         fh.write(f"  Trainable %: {pct:.2f}%\n")
+        fh.write(f"  Scheduler: {results.get('scheduler_type', 'none')}\n")
+        fh.write(f"  Warmup Ratio: {results.get('warmup_ratio', 0.0):.4f}\n")
+        fh.write(f"  Total Optimisation Steps: {results.get('total_training_steps', 0)}\n")
 
         fh.write("\nTraining Configuration\n")
         fh.write("-" * 80 + "\n")
@@ -864,6 +914,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_steps", type=int, default=hp_defaults.eval_steps)
     parser.add_argument("--save_steps", type=int, default=hp_defaults.save_steps)
     parser.add_argument(
+        "--scheduler",
+        choices=[
+            "none",
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+        ],
+        default=hp_defaults.scheduler_type or "none",
+        help="Learning rate scheduler to use.",
+    )
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=hp_defaults.warmup_ratio,
+        help="Fraction of total steps used for learning-rate warmup.",
+    )
+    parser.add_argument(
         "--eval_epoch",
         dest="eval_epoch",
         action="store_true",
@@ -1000,8 +1070,14 @@ def main():
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
+    scheduler_input = getattr(args, "scheduler", None)
+    scheduler_display = (scheduler_input or "none").lower()
+    scheduler_choice = None if scheduler_display == "none" else scheduler_display
+    warmup_ratio = max(0.0, getattr(args, "warmup_ratio", 0.0))
+
     print(f"Learning rate: {args.learning_rate}")
     print(f"Max sequence lengths: input={args.max_source_length}, target={args.max_target_length}")
+    print(f"Scheduler: {scheduler_display} | warmup ratio: {warmup_ratio:.3f}")
     print("=" * 60 + "\n")
 
     set_seed(args.seed)
@@ -1036,6 +1112,10 @@ def main():
 
     print(f"\n📂 Building dataloaders from {args.data_dir}")
     train_loader, val_loader = prepare_dataloaders(args, tokenizer, device)
+    steps_per_epoch = math.ceil(
+        max(1, len(train_loader)) / max(1, args.gradient_accumulation_steps)
+    )
+    total_training_steps = max(1, steps_per_epoch * args.epochs)
 
     trainer = ManualTrainer(
         model=model,
@@ -1054,6 +1134,9 @@ def main():
         logging_steps=args.logging_steps,
         max_target_length=args.max_target_length,
         max_eval_batches=args.max_eval_batches,
+        total_training_steps=total_training_steps,
+        scheduler_type=scheduler_choice,
+        warmup_ratio=warmup_ratio,
     )
 
     results = trainer.train(num_epochs=args.epochs)
