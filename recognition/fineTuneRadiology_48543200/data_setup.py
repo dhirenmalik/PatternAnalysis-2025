@@ -4,13 +4,12 @@ The script produces CSV splits (train/validation/test) containing the columns
 `report_text` and `lay_summary`, while printing styled progress output.
 """
 
+import os
 from pathlib import Path
 from textwrap import shorten
 
 import pandas as pd
 from datasets import load_dataset
-
-import os
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
