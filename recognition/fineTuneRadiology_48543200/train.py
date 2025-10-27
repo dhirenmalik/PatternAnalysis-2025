@@ -293,6 +293,7 @@ class ManualTrainer:
         self.rouge_scores: List[Dict[str, float]] = []
         self.step_losses: List[float] = []
         self.lr_history: List[float] = []
+        self._scaled_this_step = False
 
         print("\n" + "=" * 60)
         print("🎯 Trainer Initialised")
@@ -404,26 +405,26 @@ class ManualTrainer:
         if not torch.isfinite(loss_value_tensor):
             print("⚠️  Encountered non-finite loss; skipping backward step.")
             self.optimizer.zero_grad(set_to_none=True)
-            if self.use_mixed_precision and self.scaler is not None:
-                # Flag scaler for update after the optimiser step
-                self._skipped_step = True
+            self._scaled_this_step = False
             return loss_value
 
         if self.use_mixed_precision and self.scaler is not None:
             self.scaler.scale(loss).backward()
+            self._scaled_this_step = True
         else:
             loss.backward()
+            self._scaled_this_step = False
 
         return loss_value * self.gradient_accumulation_steps
 
     def _optimizer_step(self) -> None:
         """Apply accumulated gradients and advance the optimiser state."""
-        if self.use_mixed_precision and self.scaler is not None:
+        if self.use_mixed_precision and self.scaler is not None and self._scaled_this_step:
             self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
         scaler = getattr(self, "scaler", None)
-        if self.use_mixed_precision and scaler is not None:
+        if self.use_mixed_precision and scaler is not None and self._scaled_this_step:
             step_worked = False
             try:
                 scaler.step(self.optimizer)
@@ -434,8 +435,7 @@ class ManualTrainer:
             finally:
                 scaler.update()
                 if not step_worked:
-                    # reset flag to avoid repeated assertion checks
-                    self._skipped_step = False
+                    self._scaled_this_step = False
         else:
             self.optimizer.step()
 
@@ -448,6 +448,7 @@ class ManualTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         self.global_step += 1
         self.lr_history.append(current_lr)
+        self._scaled_this_step = False
 
     @torch.no_grad()
     def validate(self) -> (float, Dict[str, float]):
