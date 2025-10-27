@@ -405,7 +405,8 @@ class ManualTrainer:
             print("⚠️  Encountered non-finite loss; skipping backward step.")
             self.optimizer.zero_grad(set_to_none=True)
             if self.use_mixed_precision and self.scaler is not None:
-                self.scaler.update()
+                # Flag scaler for update after the optimiser step
+                self._skipped_step = True
             return loss_value
 
         if self.use_mixed_precision and self.scaler is not None:
@@ -421,9 +422,20 @@ class ManualTrainer:
             self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
-        if self.use_mixed_precision and self.scaler is not None:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+        scaler = getattr(self, "scaler", None)
+        if self.use_mixed_precision and scaler is not None:
+            step_worked = False
+            try:
+                scaler.step(self.optimizer)
+                step_worked = True
+            except AssertionError:
+                # If scaler.step was skipped due to inf/NaN, make sure we still advance
+                self.optimizer.step()
+            finally:
+                scaler.update()
+                if not step_worked:
+                    # reset flag to avoid repeated assertion checks
+                    self._skipped_step = False
         else:
             self.optimizer.step()
 
