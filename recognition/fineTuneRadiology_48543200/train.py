@@ -22,6 +22,7 @@ import evaluate
 
 from dataset import RadiologyDataset
 from modules import ModelConfig, load_model_and_tokenizer, print_model_info
+from utils import DataParams, DeviceParams, HyperParams, LoRAParams
 
 # ---------------------------------------------------------------------------
 # Environment tweaks to quiet common backend warnings
@@ -779,41 +780,55 @@ def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for manual fine-tuning.
+    """Parse command-line arguments for manual fine-tuning."""
 
-    Returns:
-        Namespace containing all CLI options for the training script.
-    """
+    hp_defaults = HyperParams()
+    lora_defaults = LoRAParams()
+    data_defaults = DataParams()
+    device_defaults = DeviceParams()
+    model_defaults = ModelConfig()
+
     parser = argparse.ArgumentParser(
         description="Manual FLAN-T5 + LoRA training loop for BioLaySumm",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    parser.set_defaults(
+        eval_epoch=hp_defaults.eval_epoch,
+        save_epoch=hp_defaults.save_epoch,
+    )
+
     # Model / LoRA
-    parser.add_argument("--model_name", default="google/flan-t5-base")
+    parser.add_argument("--model_name", default=model_defaults.model_name)
     parser.add_argument(
         "--no_lora",
         action="store_true",
+        default=not lora_defaults.enabled,
         help="Disable LoRA adapters and fine-tune all model parameters.",
     )
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.1)
+    parser.add_argument("--lora_r", type=int, default=lora_defaults.r)
+    parser.add_argument("--lora_alpha", type=int, default=lora_defaults.alpha)
+    parser.add_argument("--lora_dropout", type=float, default=lora_defaults.dropout)
 
     # Data
     parser.add_argument(
         "--data_dir",
-        default="recognition/fineTuneRadiology_48543200/data",
+        default=data_defaults.data_dir,
         help="Directory containing train.csv / val.csv",
     )
     parser.add_argument(
         "--max_input_len",
         dest="max_source_length",
         type=int,
-        default=1024,
-        help="Legacy alias for --max_source_length.",
+        default=hp_defaults.max_input_len,
+        help="Maximum encoder sequence length.",
     )
-    parser.add_argument("--max_target_len", dest="max_target_length", type=int, default=256)
+    parser.add_argument(
+        "--max_target_len",
+        dest="max_target_length",
+        type=int,
+        default=hp_defaults.max_target_len,
+    )
     parser.add_argument(
         "--eval_batch_size",
         type=int,
@@ -824,33 +839,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--subset",
         type=int,
-        default=None,
+        default=hp_defaults.subset,
         help="Optional number of training samples for quick experiments.",
     )
 
     # Training hyperparameters
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--lr", dest="learning_rate", type=float, default=3e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--epochs", type=int, default=hp_defaults.epochs)
+    parser.add_argument("--batch_size", type=int, default=hp_defaults.batch_size)
+    parser.add_argument(
+        "--lr", dest="learning_rate", type=float, default=hp_defaults.learning_rate
+    )
+    parser.add_argument("--weight_decay", type=float, default=hp_defaults.weight_decay)
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=hp_defaults.gradient_accumulation_steps,
+    )
+    parser.add_argument("--max_grad_norm", type=float, default=hp_defaults.max_grad_norm)
     parser.add_argument("--max_eval_batches", type=int, default=None)
 
     # Logging & checkpointing
     parser.add_argument("--output_dir", default="./outputs_flan_t5_lora")
-    parser.add_argument("--logging_steps", type=int, default=50)
-    parser.add_argument("--eval_steps", type=int, default=0)
-    parser.add_argument("--save_steps", type=int, default=0)
+    parser.add_argument("--logging_steps", type=int, default=hp_defaults.logging_steps)
+    parser.add_argument("--eval_steps", type=int, default=hp_defaults.eval_steps)
+    parser.add_argument("--save_steps", type=int, default=hp_defaults.save_steps)
     parser.add_argument(
         "--eval_epoch",
+        dest="eval_epoch",
         action="store_true",
         help="Evaluate only at epoch boundaries (overrides --eval_steps).",
     )
     parser.add_argument(
+        "--no_eval_epoch",
+        dest="eval_epoch",
+        action="store_false",
+        help="Disable evaluation at epoch boundaries.",
+    )
+    parser.add_argument(
         "--save_epoch",
+        dest="save_epoch",
         action="store_true",
         help="Save checkpoints only at epoch boundaries (overrides --save_steps).",
+    )
+    parser.add_argument(
+        "--no_save_epoch",
+        dest="save_epoch",
+        action="store_false",
+        help="Disable checkpoint saving at epoch boundaries.",
     )
 
     # Precision / reproducibility
@@ -858,6 +893,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no_mixed_precision",
         action="store_true",
+        default=not device_defaults.use_mixed_precision,
         help="Disable mixed precision even when a GPU is available.",
     )
     parser.add_argument("--seed", type=int, default=42)

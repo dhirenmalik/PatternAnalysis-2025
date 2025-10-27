@@ -32,6 +32,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokeniz
 
 from dataset import RadiologyDataset, load_biolaysumm
 from modules import load_tokenizer, print_model_info
+from utils import DataParams, DeviceParams, EvalParams, HyperParams
 
 # Align runtime defaults with training script to avoid noisy warnings.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -224,6 +225,7 @@ def evaluate_hf_subset(
     max_input_len: int,
     max_target_len: int,
     num_samples: int,
+    num_beams: int,
     split: str = "validation",
 ) -> Dict[str, float]:
     """Run ROUGE computation on a subset of the Hugging Face dataset.
@@ -266,7 +268,12 @@ def evaluate_hf_subset(
         ).to(device)
 
         with torch.no_grad():
-            generated = model.generate(**inputs, max_length=max_target_len)
+            generated = model.generate(
+                **inputs,
+                max_length=max_target_len,
+                num_beams=num_beams,
+                early_stopping=True,
+            )
 
         predictions.append(tokenizer.decode(generated[0], skip_special_tokens=True))
         references.append(example[target_col])
@@ -390,33 +397,67 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for evaluation."""
+    eval_defaults = EvalParams()
+    data_defaults = DataParams()
+    device_defaults = DeviceParams()
+    hp_defaults = HyperParams()
+
     parser = argparse.ArgumentParser(
         description="Evaluate a FLAN-T5 LoRA checkpoint on radiology summaries.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument("--checkpoint", default="outputs_flan_t5_lora/best_model", help="Path to checkpoint directory.")
+    parser.add_argument(
+        "--checkpoint", default="outputs_flan_t5_lora/best_model", help="Path to checkpoint directory."
+    )
     parser.add_argument(
         "--device",
         choices=["auto", "cuda", "mps", "cpu"],
-        default="auto",
+        default=device_defaults.preferred_device,
         help="Inference device selection.",
     )
     parser.add_argument(
         "--data_dir",
-        default="recognition/fineTuneRadiology_48543200/data",
+        default=data_defaults.data_dir,
         help="Directory containing train/val/test CSV files.",
     )
-    parser.add_argument("--split", default="test", help="Dataset split to evaluate (train/val/test).")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for generation.")
-    parser.add_argument("--max_source_length", type=int, default=512, help="Maximum encoder sequence length.")
-    parser.add_argument("--max_target_length", type=int, default=256, help="Maximum decoder sequence length.")
-    parser.add_argument("--max_length", type=int, default=256, help="Maximum length for generation outputs.")
-    parser.add_argument("--num_beams", type=int, default=4, help="Beam search width.")
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=3, help="No-repeat n-gram constraint.")
-    parser.add_argument("--num_examples", type=int, default=5, help="Number of examples to print.")
+    parser.add_argument("--split", default="val", help="Dataset split to evaluate (train/val/test).")
+    parser.add_argument(
+        "--batch_size", type=int, default=eval_defaults.batch_size, help="Batch size for generation."
+    )
+    parser.add_argument(
+        "--max_source_length",
+        type=int,
+        default=hp_defaults.max_input_len,
+        help="Maximum encoder sequence length.",
+    )
+    parser.add_argument(
+        "--max_target_length",
+        type=int,
+        default=hp_defaults.max_target_len,
+        help="Maximum decoder sequence length.",
+    )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=hp_defaults.max_target_len,
+        help="Maximum length for generation outputs.",
+    )
+    parser.add_argument(
+        "--num_beams", type=int, default=eval_defaults.num_beams, help="Beam search width."
+    )
+    parser.add_argument(
+        "--no_repeat_ngram_size", type=int, default=3, help="No-repeat n-gram constraint."
+    )
+    parser.add_argument(
+        "--num_examples", type=int, default=eval_defaults.num_examples, help="Number of examples to print."
+    )
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on samples evaluated from CSV.")
-    parser.add_argument("--prefix", default="summarize for a layperson: ", help="Instruction prefix for inputs.")
+    parser.add_argument(
+        "--prefix",
+        default=data_defaults.prefix,
+        help="Instruction prefix for inputs.",
+    )
     parser.add_argument(
         "--output_dir",
         default=None,
@@ -425,11 +466,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hf_rouge_samples",
         type=int,
-        default=0,
+        default=eval_defaults.hf_rouge_samples,
         help="If > 0, also compute ROUGE on this many Hugging Face validation samples.",
     )
     parser.add_argument("--hf_split", default="validation", help="Hugging Face split used for optional evaluation.")
-    parser.add_argument("--hf_prefix", default="summarize radiology: ", help="Prefix used for Hugging Face evaluation.")
+    parser.add_argument(
+        "--hf_prefix",
+        default=data_defaults.hf_eval_prefix,
+        help="Prefix used for Hugging Face evaluation.",
+    )
 
     return parser.parse_args()
 
@@ -518,6 +563,7 @@ def main() -> None:
             max_input_len=args.max_source_length,
             max_target_len=args.max_target_length,
             num_samples=args.hf_rouge_samples,
+            num_beams=args.num_beams,
             split=args.hf_split,
         )
 

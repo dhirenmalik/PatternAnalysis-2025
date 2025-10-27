@@ -1,9 +1,18 @@
+# Avoid committing compiled artifacts
 __pycache__/
 *.py[cod]
+
+# Dataset generated locally by data_setup.py
 recognition/fineTuneRadiology_48543200/data/
+
+# Local virtual environment
 .venv/
+
+# Training output directories (checkpoints, logs, experiments)
 outputs_flan_t5_lora/
 outputs_flan_t5_lora_*/
 outputs_*/
+
+# IDE / OS metadata
 .idea/
 .DS_Store

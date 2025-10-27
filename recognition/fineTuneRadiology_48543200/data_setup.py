@@ -10,8 +10,11 @@ from textwrap import shorten
 
 import pandas as pd
 from datasets import load_dataset
+from utils import DataParams
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+CONFIG = DataParams()
 
 
 SECTION: str = "=" * 70
@@ -55,15 +58,15 @@ def preview(series: pd.Series, width: int = 80) -> str:
 
 def main() -> None:
     """Download, clean, and export BioLaySumm2025 splits."""
-    output_dir = Path("recognition/fineTuneRadiology_48543200/data")
+    output_dir = Path(CONFIG.data_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print_header("BioLaySumm2025 Dataset Preparation")
     print(f"📂 Output directory: {output_dir.resolve()}")
 
     print_section("Step 1 · Download dataset")
-    print("🔽 Fetching `BioLaySumm/BioLaySumm2025-LaymanRRG-opensource-track` from Hugging Face...")
-    dataset = load_dataset("BioLaySumm/BioLaySumm2025-LaymanRRG-opensource-track")
+    print(f"🔽 Fetching `{CONFIG.hf_dataset_name}` from Hugging Face...")
+    dataset = load_dataset(CONFIG.hf_dataset_name)
 
     print("\n📊 Split overview:")
     for split in ["train", "validation", "test"]:

@@ -13,6 +13,7 @@ from peft import PeftConfig, PeftModel
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokenizerBase
 
 from modules import load_tokenizer, print_model_info
+from utils import DataParams, DeviceParams, EvalParams, HyperParams
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -98,11 +99,20 @@ def predict_single(
 
 
 def parse_args() -> argparse.Namespace:
+    data_defaults = DataParams()
+    device_defaults = DeviceParams()
+    eval_defaults = EvalParams()
+    hp_defaults = HyperParams()
+
     parser = argparse.ArgumentParser(
         description="Generate a single lay summary from a trained FLAN-T5 checkpoint.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoint", required=True, help="Path to the model checkpoint directory.")
+    parser.add_argument(
+        "--checkpoint",
+        default="outputs_flan_t5_lora/best_model",
+        help="Path to the model checkpoint directory.",
+    )
     parser.add_argument(
         "--text",
         required=True,
@@ -110,13 +120,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prefix",
-        default="summarize for a layperson: ",
+        default=data_defaults.prefix,
         help="Instruction prefix prepended to the input text.",
     )
-    parser.add_argument("--max_input_len", type=int, default=512)
-    parser.add_argument("--max_target_len", type=int, default=128)
-    parser.add_argument("--num_beams", type=int, default=4)
-    parser.add_argument("--device", choices=["auto", "cuda", "mps", "cpu"], default="auto")
+    parser.add_argument("--max_input_len", type=int, default=hp_defaults.max_input_len)
+    parser.add_argument("--max_target_len", type=int, default=hp_defaults.max_target_len)
+    parser.add_argument("--num_beams", type=int, default=eval_defaults.num_beams)
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "mps", "cpu"],
+        default=device_defaults.preferred_device,
+    )
     return parser.parse_args()
 
 
