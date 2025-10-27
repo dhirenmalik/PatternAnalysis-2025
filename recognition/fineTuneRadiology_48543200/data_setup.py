@@ -10,6 +10,10 @@ from textwrap import shorten
 import pandas as pd
 from datasets import load_dataset
 
+import os
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 
 SECTION: str = "=" * 70
 SUBSECTION: str = "-" * 70
