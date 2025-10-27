@@ -29,7 +29,6 @@ def resolve_device(choice: str) -> torch.device:
     Returns:
         Torch device that should host the model and inputs.
     """
-
     if choice == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")
@@ -66,7 +65,6 @@ def load_checkpoint(
     Returns:
         Tuple of the loaded model (in evaluation mode) and the tokenizer.
     """
-
     checkpoint_path = checkpoint_path.expanduser().resolve()
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
@@ -81,7 +79,8 @@ def load_checkpoint(
         tokenizer = load_tokenizer(base_name)
         base_model = AutoModelForSeq2SeqLM.from_pretrained(base_name)
         model = PeftModel.from_pretrained(base_model, checkpoint_path)
-        model = model.merge_and_unload()  # merge LoRA adapters for inference speed
+        # For single inference, merge adapters for speed.
+        model = model.merge_and_unload()
 
     model = model.to(device).eval()
     print_model_info(model)
@@ -96,24 +95,21 @@ def predict_single(
     max_input_len: int,
     max_target_len: int,
     num_beams: int,
-    no_repeat_ngram_size: int = 0,
 ) -> str:
     """Generate a summary for a single prompt using beam search.
 
     Args:
-        model: Autoregressive seq2seq model already loaded on `device`.
+        model: Autoregressive seq2seq model already loaded on ``device``.
         tokenizer: Tokenizer matched to the model vocabulary.
         device: Torch device used for inference.
         prompt: Text fed into the encoder, usually prefix + report.
         max_input_len: Maximum number of tokens allowed for the input prompt.
         max_target_len: Maximum number of tokens to decode.
         num_beams: Beam search width.
-        no_repeat_ngram_size: Optional n-gram constraint for diversity.
 
     Returns:
         Decoded summary string.
     """
-
     inputs = tokenizer(
         prompt,
         max_length=max_input_len,
@@ -126,7 +122,6 @@ def predict_single(
             **inputs,
             max_length=max_target_len,
             num_beams=num_beams,
-            no_repeat_ngram_size=no_repeat_ngram_size,
             early_stopping=True,
         )
 
@@ -139,7 +134,6 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed command-line arguments.
     """
-
     data_defaults = DataParams()
     device_defaults = DeviceParams()
     eval_defaults = EvalParams()
@@ -168,12 +162,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_target_len", type=int, default=hp_defaults.max_target_len)
     parser.add_argument("--num_beams", type=int, default=eval_defaults.num_beams)
     parser.add_argument(
-        "--no_repeat_ngram_size",
-        type=int,
-        default=0,
-        help="Set > 0 to prohibit repeating n-grams during generation.",
-    )
-    parser.add_argument(
         "--device",
         choices=["auto", "cuda", "mps", "cpu"],
         default=device_defaults.preferred_device,
@@ -187,7 +175,6 @@ def main() -> None:
     Returns:
         None. Outputs are printed directly to stdout.
     """
-
     args = parse_args()
     device = resolve_device(args.device)
     print(f"🖥️  Using {device.type.upper()} for inference.")
@@ -204,7 +191,6 @@ def main() -> None:
         max_input_len=args.max_input_len,
         max_target_len=args.max_target_len,
         num_beams=args.num_beams,
-        no_repeat_ngram_size=args.no_repeat_ngram_size,
     )
 
     print("\n=== Prediction ===")

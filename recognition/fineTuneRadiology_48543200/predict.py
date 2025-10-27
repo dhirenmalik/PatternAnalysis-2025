@@ -19,24 +19,20 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import evaluate
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Subset
+from peft import PeftConfig, PeftModel
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokenizerBase
 
 from dataset import RadiologyDataset, load_biolaysumm
-from modules import print_model_info
-from predict_single import (
-    load_checkpoint as load_single_checkpoint,
-    predict_single as summarize_single,
-    resolve_device as resolve_single_device,
-)
+from modules import load_tokenizer, print_model_info
 from utils import DataParams, DeviceParams, EvalParams, HyperParams
-from transformers import PreTrainedTokenizerBase
 
 # Align runtime defaults with training script to avoid noisy warnings.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -47,22 +43,38 @@ os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 ROUGE_METRIC = evaluate.load("rouge")
 
 
-def load_model(checkpoint_path: str, device: torch.device):
-    """Load a checkpoint via the single-example helper and log model stats.
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def load_model(checkpoint_path: str, device: torch.device) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase]:
+    """Load a FLAN-T5 model, merging LoRA adapters when present.
 
     Args:
-        checkpoint_path: Directory containing the trained weights.
-        device: Torch device that should host the model.
+        checkpoint_path: Directory containing the saved model or LoRA adapters.
+        device: Target device to place the model on.
 
     Returns:
-        Tuple of (model, tokenizer) ready for inference.
+        Tuple of the loaded model (in eval mode) and the corresponding tokenizer.
     """
-
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
 
-    model, tokenizer = load_single_checkpoint(checkpoint_path, device)
+    try:
+        config = PeftConfig.from_pretrained(checkpoint_path)
+    except (OSError, ValueError):
+        # Not a PEFT checkpoint; fall back to standard loading.
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint_path)
+    else:
+        base_model_name = config.base_model_name_or_path
+        tokenizer = load_tokenizer(base_model_name)
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+        model = PeftModel.from_pretrained(base_model, checkpoint_path)
+        model = model.merge_and_unload()
+
+    model = model.to(device).eval()
     print_model_info(model)
     return model, tokenizer
 
@@ -127,40 +139,15 @@ def prepare_csv_dataloader(
     return dataset, dataloader
 
 
-def _resolve_raw_example(dataset, idx: int) -> Tuple[str, str, str]:
-    """Return raw input text, reference summary, and prefix for a dataset index.
-
-    Args:
-        dataset: `RadiologyDataset` or `Subset` wrapping it.
-        idx: Zero-based index in the loader iteration order.
-
-    Returns:
-        Tuple with (report_text, lay_summary, prefix).
-    """
-
-    if isinstance(dataset, Subset):
-        base_idx = dataset.indices[idx]
-        return _resolve_raw_example(dataset.dataset, base_idx)
-
-    if hasattr(dataset, "data"):
-        row = dataset.data.iloc[idx]
-        prefix = getattr(dataset, "prefix", "")
-        return row["report_text"], row["lay_summary"], prefix
-
-    raise ValueError("Dataset does not expose raw text (expected RadiologyDataset).")
-
-
 # ---------------------------------------------------------------------------
 # Generation & evaluation
 # ---------------------------------------------------------------------------
 
 def generate_predictions(
-    model: Any,
+    model: AutoModelForSeq2SeqLM,
     tokenizer: PreTrainedTokenizerBase,
     dataloader: DataLoader,
     device: torch.device,
-    prompt_prefix: Optional[str],
-    max_source_length: int,
     max_length: int,
     num_beams: int,
     no_repeat_ngram_size: int,
@@ -172,9 +159,6 @@ def generate_predictions(
         tokenizer: Tokenizer for decoding predictions and inputs.
         dataloader: Loader that yields batches from the evaluation split.
         device: Device on which inference runs.
-        prompt_prefix: Optional override for the dataset prefix. If ``None`` the
-            dataset-specified prefix is used.
-        max_source_length: Truncation length for encoder inputs.
         max_length: Maximum generation length.
         num_beams: Beam search width.
         no_repeat_ngram_size: Prevents repeating n-grams during generation.
@@ -187,33 +171,26 @@ def generate_predictions(
     references: List[str] = []
     decoded_inputs: List[str] = []
 
-    dataset = dataloader.dataset
-    position = 0
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Generating"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].clone()  # avoid modifying original batch
 
-    for batch in tqdm(dataloader, desc="Generating"):
-        batch_size = len(batch["input_ids"])
-
-        for offset in range(batch_size):
-            raw_text, reference_text, dataset_prefix = _resolve_raw_example(dataset, position + offset)
-            prefix_to_use = prompt_prefix if prompt_prefix is not None else dataset_prefix
-            prompt = prefix_to_use + raw_text
-
-            summary = summarize_single(
-                model=model,
-                tokenizer=tokenizer,
-                device=device,
-                prompt=prompt,
-                max_input_len=max_source_length,
-                max_target_len=max_length,
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=max_length,
                 num_beams=num_beams,
                 no_repeat_ngram_size=no_repeat_ngram_size,
+                early_stopping=True,
             )
 
-            predictions.append(summary)
-            references.append(reference_text)
-            decoded_inputs.append(raw_text)
+            predictions.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
 
-        position += batch_size
+            labels[labels == -100] = tokenizer.pad_token_id
+            references.extend(tokenizer.batch_decode(labels, skip_special_tokens=True))
+            decoded_inputs.extend(tokenizer.batch_decode(input_ids, skip_special_tokens=True))
 
     return predictions, references, decoded_inputs
 
@@ -241,7 +218,7 @@ def compute_rouge_scores(predictions: List[str], references: List[str]) -> Dict[
 
 
 def evaluate_hf_subset(
-    model: Any,
+    model: AutoModelForSeq2SeqLM,
     tokenizer: PreTrainedTokenizerBase,
     device: torch.device,
     add_prefix: str,
@@ -249,7 +226,6 @@ def evaluate_hf_subset(
     max_target_len: int,
     num_samples: int,
     num_beams: int,
-    no_repeat_ngram_size: int,
     split: str = "validation",
 ) -> Dict[str, float]:
     """Run ROUGE computation on a subset of the Hugging Face dataset.
@@ -264,8 +240,6 @@ def evaluate_hf_subset(
         max_input_len: Maximum encoder length.
         max_target_len: Maximum decoder length.
         num_samples: Number of validation samples to evaluate.
-        num_beams: Beam search width for generation.
-        no_repeat_ngram_size: Prevents repeating n-grams during generation.
         split: Dataset split to evaluate (defaults to ``validation``).
 
     Returns:
@@ -286,18 +260,22 @@ def evaluate_hf_subset(
 
     for example in subset:
         prompt = add_prefix + example[input_col]
-        summary = summarize_single(
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            prompt=prompt,
-            max_input_len=max_input_len,
-            max_target_len=max_target_len,
-            num_beams=num_beams,
-            no_repeat_ngram_size=no_repeat_ngram_size,
-        )
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_input_len,
+        ).to(device)
 
-        predictions.append(summary)
+        with torch.no_grad():
+            generated = model.generate(
+                **inputs,
+                max_length=max_target_len,
+                num_beams=num_beams,
+                early_stopping=True,
+            )
+
+        predictions.append(tokenizer.decode(generated[0], skip_special_tokens=True))
         references.append(example[target_col])
 
     rouge_scores = compute_rouge_scores(predictions, references)
@@ -326,7 +304,7 @@ def print_examples(
         num_examples: Maximum number of examples to display.
 
     Returns:
-        None. Examples are printed to stdout.
+        None. Examples are printed for inspection.
     """
     if not predictions:
         print("\n⚠️  No predictions available to display.")
@@ -366,7 +344,7 @@ def save_results(
         output_dir: Directory where artefacts are written.
 
     Returns:
-        None. Generates artefact files on disk.
+        None. Artefact files are written to disk.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -410,7 +388,7 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
         rouge_scores: ROUGE metric values to append.
 
     Returns:
-        None. Appends text to ``RESULTS.txt`` if scores are provided.
+        None. Appends metrics to the checkpoint log when provided.
     """
     if not rouge_scores:
         return
@@ -427,7 +405,7 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line options for batched evaluation.
+    """Parse command-line options for evaluation.
 
     Returns:
         Parsed command-line arguments.
@@ -519,14 +497,38 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Entry point for batched evaluation and reporting.
+    """Entry point for evaluation and reporting.
 
     Returns:
-        None. This function orchestrates I/O side effects.
+        None. Orchestrates CLI-side effects.
     """
     args = parse_args()
 
-    device = resolve_single_device(args.device)
+    def resolve_device(choice: str) -> torch.device:
+        mps_backend = getattr(torch.backends, "mps", None)
+
+        if choice == "auto":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+                return torch.device("mps")
+            return torch.device("cpu")
+
+        if choice == "cuda":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            print("⚠️  CUDA requested but not available. Falling back to CPU.")
+            return torch.device("cpu")
+
+        if choice == "mps":
+            if mps_backend and mps_backend.is_available():  # pragma: no cover
+                return torch.device("mps")
+            print("⚠️  MPS requested but not available. Falling back to CPU.")
+            return torch.device("cpu")
+
+        return torch.device("cpu")
+
+    device = resolve_device(args.device)
     print(f"🖥️  Using {device.type.upper()} for inference.")
 
     checkpoint_path = Path(args.checkpoint)
@@ -551,8 +553,6 @@ def main() -> None:
         tokenizer=tokenizer,
         dataloader=dataloader,
         device=device,
-        prompt_prefix=args.prefix,
-        max_source_length=args.max_source_length,
         max_length=args.max_length,
         num_beams=args.num_beams,
         no_repeat_ngram_size=args.no_repeat_ngram_size,
@@ -581,7 +581,6 @@ def main() -> None:
             max_target_len=args.max_target_length,
             num_samples=args.hf_rouge_samples,
             num_beams=args.num_beams,
-            no_repeat_ngram_size=args.no_repeat_ngram_size,
             split=args.hf_split,
         )
 
