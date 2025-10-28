@@ -875,6 +875,7 @@ outputs_flan_t5_lora/
 | `train.py` | Custom training loop with logging and evaluation hooks | `ManualTrainer`, `main()` |
 | `predict.py` | Batched evaluation with ROUGE scoring | `generate_predictions()`, `compute_rouge_scores()` |
 | `predict_single.py` | Single-example inference CLI | `predict_single()` |
+| `utils.py` | Shared configuration dataclasses and device utilities | `HyperParams`, `DeviceParams`, `EvalParams`, `DataParams` |
 
 ### Command-Line Arguments
 

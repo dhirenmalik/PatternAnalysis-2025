@@ -1,3 +1,7 @@
+# @file train.py
+# @brief Custom FLAN-T5 + LoRA training loop for BioLaySumm experiments.
+# @author Dhiren Malik (48543200)
+
 """Custom training loop for FLAN-T5 + LoRA on the BioLaySumm dataset."""
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -50,6 +54,7 @@ rouge_metric = evaluate.load("rouge")
 # ---------------------------------------------------------------------------
 # Reproducibility / hardware helpers
 # ---------------------------------------------------------------------------
+
 
 def set_seed(seed: int) -> None:
     """Set RNG seeds for Python, NumPy, and PyTorch (CPU/GPU).
@@ -93,7 +98,9 @@ def get_hardware_info() -> Dict[str, Optional[str]]:
         "gpu_vram_total_gb": None,
         "gpu_vram_available_gb": None,
         "gpu_compute_capability": None,
-        "mps_available": bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()),
+        "mps_available": bool(
+            getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+        ),
     }
 
     if info["cuda_available"]:
@@ -147,6 +154,7 @@ def print_hardware_info(info: Dict[str, Optional[str]]) -> None:
 # Metrics
 # ---------------------------------------------------------------------------
 
+
 def compute_rouge_metrics(
     predictions: List[np.ndarray],
     references: List[np.ndarray],
@@ -193,6 +201,7 @@ def compute_rouge_metrics(
 # ---------------------------------------------------------------------------
 # Manual trainer
 # ---------------------------------------------------------------------------
+
 
 class ManualTrainer:
     """Minimal, transparent training loop for seq2seq finetuning."""
@@ -267,7 +276,9 @@ class ManualTrainer:
         self.warmup_ratio = max(0.0, warmup_ratio)
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+        self.optimizer = AdamW(
+            trainable_params, lr=learning_rate, weight_decay=weight_decay
+        )
 
         self.use_mixed_precision = use_mixed_precision and device.type == "cuda"
         self.scaler = (
@@ -322,9 +333,7 @@ class ManualTrainer:
         print(f"  Save every N steps: {self.save_steps or 'epoch'}")
         print(f"  Logging every N steps: {self.logging_steps}")
         scheduler_label = self.scheduler_type or "none"
-        print(
-            f"  Scheduler: {scheduler_label} | warmup ratio: {self.warmup_ratio:.3f}"
-        )
+        print(f"  Scheduler: {scheduler_label} | warmup ratio: {self.warmup_ratio:.3f}")
         print(f"  Total optimisation steps: {self.total_training_steps}")
         print(f"  Output directory: {self.output_dir}")
         print("=" * 60 + "\n")
@@ -453,7 +462,11 @@ class ManualTrainer:
         Returns:
             None. Updates optimiser, scheduler, and step counters in place.
         """
-        if self.use_mixed_precision and self.scaler is not None and self._scaled_this_step:
+        if (
+            self.use_mixed_precision
+            and self.scaler is not None
+            and self._scaled_this_step
+        ):
             self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
@@ -485,7 +498,7 @@ class ManualTrainer:
         self._scaled_this_step = False
 
     @torch.no_grad()
-    def validate(self) -> (float, Dict[str, float]):
+    def validate(self) -> Tuple[float, Dict[str, float]]:
         """Evaluate the model on the validation loader.
 
         Returns:
@@ -557,7 +570,9 @@ class ManualTrainer:
         Returns:
             None. Files are written under the trainer's output directory.
         """
-        target_dir = self.output_dir / ("best_model" if is_best else f"checkpoint-step-{self.global_step}")
+        target_dir = self.output_dir / (
+            "best_model" if is_best else f"checkpoint-step-{self.global_step}"
+        )
         target_dir.mkdir(parents=True, exist_ok=True)
 
         self.model.save_pretrained(target_dir)
@@ -661,6 +676,7 @@ class ManualTrainer:
 # Utilities for saving training summaries
 # ---------------------------------------------------------------------------
 
+
 def save_training_artifacts(
     output_dir: Path,
     args,
@@ -702,8 +718,12 @@ def save_training_artifacts(
             "max_source_length": args.max_source_length,
             "max_target_length": args.max_target_length,
             "seed": args.seed,
-            "learning_rate_scheduler": results.get("scheduler_type", getattr(args, "scheduler", "none")),
-            "warmup_ratio": results.get("warmup_ratio", getattr(args, "warmup_ratio", 0.0)),
+            "learning_rate_scheduler": results.get(
+                "scheduler_type", getattr(args, "scheduler", "none")
+            ),
+            "warmup_ratio": results.get(
+                "warmup_ratio", getattr(args, "warmup_ratio", 0.0)
+            ),
         },
         "results": {
             "best_rouge_lsum": results["best_rouge"],
@@ -753,14 +773,18 @@ def save_training_artifacts(
         fh.write(f"  Trainable %: {pct:.2f}%\n")
         fh.write(f"  Scheduler: {results.get('scheduler_type', 'none')}\n")
         fh.write(f"  Warmup Ratio: {results.get('warmup_ratio', 0.0):.4f}\n")
-        fh.write(f"  Total Optimisation Steps: {results.get('total_training_steps', 0)}\n")
+        fh.write(
+            f"  Total Optimisation Steps: {results.get('total_training_steps', 0)}\n"
+        )
 
         fh.write("\nTraining Configuration\n")
         fh.write("-" * 80 + "\n")
         fh.write(f"  Epochs: {args.epochs}\n")
         fh.write(f"  Batch Size: {args.batch_size}\n")
         fh.write(f"  Gradient Accumulation Steps: {args.gradient_accumulation_steps}\n")
-        fh.write(f"  Effective Batch Size: {args.batch_size * args.gradient_accumulation_steps}\n")
+        fh.write(
+            f"  Effective Batch Size: {args.batch_size * args.gradient_accumulation_steps}\n"
+        )
         fh.write(f"  Learning Rate: {args.learning_rate}\n")
         fh.write(f"  Weight Decay: {args.weight_decay}\n")
         fh.write(f"  Max Grad Norm: {args.max_grad_norm}\n")
@@ -795,7 +819,9 @@ def save_training_artifacts(
             for idx, score in enumerate(results["rouge_scores"], start=1):
                 fh.write(f"  Checkpoint {idx}: {score}\n")
 
-        fh.write("\nGenerated at: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        fh.write(
+            "\nGenerated at: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
+        )
         fh.write("=" * 80 + "\n")
 
     print(f"📊 Training artefacts saved to {output_dir}")
@@ -891,6 +917,7 @@ def save_training_plots(output_dir: Path, results: Dict[str, Any]) -> None:
 # Argument parsing & main entry
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for manual fine-tuning.
 
@@ -971,7 +998,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=hp_defaults.gradient_accumulation_steps,
     )
-    parser.add_argument("--max_grad_norm", type=float, default=hp_defaults.max_grad_norm)
+    parser.add_argument(
+        "--max_grad_norm", type=float, default=hp_defaults.max_grad_norm
+    )
     parser.add_argument("--max_eval_batches", type=int, default=None)
 
     # Logging & checkpointing
@@ -1025,7 +1054,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Precision / reproducibility
-    parser.add_argument("--fp16", action="store_true", help="Hint to use fp16 mixed precision.")
+    parser.add_argument(
+        "--fp16", action="store_true", help="Hint to use fp16 mixed precision."
+    )
     parser.add_argument(
         "--no_mixed_precision",
         action="store_true",
@@ -1038,7 +1069,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def prepare_dataloaders(args, tokenizer, device: torch.device) -> (DataLoader, DataLoader):
+def prepare_dataloaders(
+    args, tokenizer, device: torch.device
+) -> Tuple[DataLoader, DataLoader]:
     """Build train/validation dataloaders from CSV splits.
 
     Args:
@@ -1077,7 +1110,9 @@ def prepare_dataloaders(args, tokenizer, device: torch.device) -> (DataLoader, D
         val_subset = max(1, subset_size // 10)
         train_dataset = Subset(train_dataset, range(subset_size))
         val_dataset = Subset(val_dataset, range(val_subset))
-        print(f"⚙️  Using subset: {subset_size} train samples / {val_subset} val samples")
+        print(
+            f"⚙️  Using subset: {subset_size} train samples / {val_subset} val samples"
+        )
 
     if args.dry_run:
         train_limit = min(len(train_dataset), 8)
@@ -1146,7 +1181,9 @@ def main():
     warmup_ratio = max(0.0, getattr(args, "warmup_ratio", 0.0))
 
     print(f"Learning rate: {args.learning_rate}")
-    print(f"Max sequence lengths: input={args.max_source_length}, target={args.max_target_length}")
+    print(
+        f"Max sequence lengths: input={args.max_source_length}, target={args.max_target_length}"
+    )
     print(f"Scheduler: {scheduler_display} | warmup ratio: {warmup_ratio:.3f}")
     print("=" * 60 + "\n")
 
@@ -1163,7 +1200,9 @@ def main():
         if torch.cuda.is_available():
             return torch.device("cuda")
         mps_backend = getattr(torch.backends, "mps", None)
-        if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+        if (
+            mps_backend and mps_backend.is_available()
+        ):  # pragma: no cover - requires macOS
             return torch.device("mps")
         return torch.device("cpu")
 
@@ -1220,7 +1259,9 @@ def main():
     )
     save_training_plots(Path(args.output_dir), results)
 
-    print("\n✅ Training complete! Check the output directory for artefacts and checkpoints.")
+    print(
+        "\n✅ Training complete! Check the output directory for artefacts and checkpoints."
+    )
 
 
 if __name__ == "__main__":

@@ -1,3 +1,7 @@
+# @file data_setup.py
+# @brief Download and preprocess BioLaySumm2025 splits for local training.
+# @author Dhiren Malik (48543200)
+
 """Download and clean the BioLaySumm2025 dataset for local training.
 
 The script produces CSV splits (train/validation/test) containing the columns

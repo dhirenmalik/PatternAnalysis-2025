@@ -1,3 +1,7 @@
+# @file dataset.py
+# @brief Dataset and dataloader helpers for BioLaySumm LoRA fine-tuning.
+# @author Dhiren Malik (48543200)
+
 """Dataset utilities for the manual BioLaySumm training workflow."""
 
 from pathlib import Path
@@ -56,13 +60,19 @@ def load_biolaysumm(split_mapping: Optional[Dict[str, str]] = None) -> DatasetDi
     """
     ds = load_dataset("BioLaySumm/BioLaySumm2025-LaymanRRG-opensource-track")
 
-    if isinstance(ds, DatasetDict) and set(ds.keys()) >= {"train", "validation", "test"}:
+    if isinstance(ds, DatasetDict) and set(ds.keys()) >= {
+        "train",
+        "validation",
+        "test",
+    }:
         return ds
 
     base = ds["train"] if "train" in ds else list(ds.values())[0]
     tmp = base.train_test_split(test_size=0.1, seed=42)
     val_test = tmp["test"].train_test_split(test_size=0.5, seed=42)
-    return DatasetDict(train=tmp["train"], validation=val_test["train"], test=val_test["test"])
+    return DatasetDict(
+        train=tmp["train"], validation=val_test["train"], test=val_test["test"]
+    )
 
 
 def build_tokenized(

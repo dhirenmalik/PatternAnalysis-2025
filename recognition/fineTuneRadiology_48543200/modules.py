@@ -1,3 +1,7 @@
+# @file modules.py
+# @brief Model assembly helpers for FLAN-T5 + LoRA experiments.
+# @author Dhiren Malik (48543200)
+
 """Model utilities for the custom FLAN-T5 + LoRA training workflow."""
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ class ModelConfig:
 # Tokenizer helpers
 # ---------------------------------------------------------------------------
 
+
 def load_tokenizer(model_name: str = "google/flan-t5-base") -> PreTrainedTokenizerBase:
     """Load the FLAN-T5 tokenizer with basic diagnostics.
 
@@ -46,13 +51,16 @@ def load_tokenizer(model_name: str = "google/flan-t5-base") -> PreTrainedTokeniz
     """
     print(f"🔤 Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    print(f"   Vocab size: {tokenizer.vocab_size:,} | pad_token_id: {tokenizer.pad_token_id}")
+    print(
+        f"   Vocab size: {tokenizer.vocab_size:,} | pad_token_id: {tokenizer.pad_token_id}"
+    )
     return tokenizer
 
 
 # ---------------------------------------------------------------------------
 # Model construction
 # ---------------------------------------------------------------------------
+
 
 def build_model(
     model_name: str = "google/flan-t5-base",
@@ -87,7 +95,9 @@ def build_model(
     if use_lora:
         target_modules = target_modules or ("q", "v")
         print("🔧 Applying LoRA adapters:")
-        print(f"   r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}, targets={target_modules}")
+        print(
+            f"   r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}, targets={target_modules}"
+        )
 
         lora_cfg = LoraConfig(
             r=lora_r,
@@ -119,6 +129,7 @@ def build_model(
 # ---------------------------------------------------------------------------
 # Unified loader used across training scripts
 # ---------------------------------------------------------------------------
+
 
 def load_model_and_tokenizer(
     cfg: Optional[ModelConfig] = None,
@@ -158,6 +169,7 @@ def load_model_and_tokenizer(
 # ---------------------------------------------------------------------------
 # Utility helpers for manual inspection
 # ---------------------------------------------------------------------------
+
 
 def print_model_info(model: torch.nn.Module) -> None:
     """Display total, trainable, and frozen parameter counts.

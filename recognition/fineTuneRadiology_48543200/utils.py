@@ -1,3 +1,7 @@
+# @file utils.py
+# @brief Shared configuration dataclasses and utilities for the training stack.
+# @author Dhiren Malik (48543200)
+
 """Centralised configuration defaults and helpers for the FLAN-T5 workflow."""
 
 from __future__ import annotations

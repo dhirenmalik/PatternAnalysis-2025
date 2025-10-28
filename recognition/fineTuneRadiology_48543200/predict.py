@@ -1,3 +1,7 @@
+# @file predict.py
+# @brief Batched evaluation CLI for FLAN-T5 + LoRA checkpoints.
+# @author Dhiren Malik (48543200)
+
 """Evaluation script for the manual FLAN‑T5 + LoRA training pipeline.
 
 Combines the lightweight Hugging Face dataset inspection workflow with the
@@ -47,7 +51,10 @@ ROUGE_METRIC = evaluate.load("rouge")
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint_path: str, device: torch.device) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase]:
+
+def load_model(
+    checkpoint_path: str, device: torch.device
+) -> Tuple[AutoModelForSeq2SeqLM, PreTrainedTokenizerBase]:
     """Load a FLAN-T5 model, merging LoRA adapters when present.
 
     Args:
@@ -82,6 +89,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> Tuple[AutoModelFor
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def prepare_csv_dataloader(
     tokenizer: PreTrainedTokenizerBase,
@@ -143,6 +151,7 @@ def prepare_csv_dataloader(
 # Generation & evaluation
 # ---------------------------------------------------------------------------
 
+
 def generate_predictions(
     model: AutoModelForSeq2SeqLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -186,16 +195,22 @@ def generate_predictions(
                 early_stopping=True,
             )
 
-            predictions.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
+            predictions.extend(
+                tokenizer.batch_decode(generated, skip_special_tokens=True)
+            )
 
             labels[labels == -100] = tokenizer.pad_token_id
             references.extend(tokenizer.batch_decode(labels, skip_special_tokens=True))
-            decoded_inputs.extend(tokenizer.batch_decode(input_ids, skip_special_tokens=True))
+            decoded_inputs.extend(
+                tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            )
 
     return predictions, references, decoded_inputs
 
 
-def compute_rouge_scores(predictions: List[str], references: List[str]) -> Dict[str, float]:
+def compute_rouge_scores(
+    predictions: List[str], references: List[str]
+) -> Dict[str, float]:
     """Compute ROUGE metrics for a list of predictions and references.
 
     Args:
@@ -205,8 +220,12 @@ def compute_rouge_scores(predictions: List[str], references: List[str]) -> Dict[
     Returns:
         Dictionary of ROUGE-1/2/L/Lsum scores.
     """
-    formatted_preds = ["\n".join(pred.strip().split(".")) or "empty" for pred in predictions]
-    formatted_refs = ["\n".join(ref.strip().split(".")) or "empty" for ref in references]
+    formatted_preds = [
+        "\n".join(pred.strip().split(".")) or "empty" for pred in predictions
+    ]
+    formatted_refs = [
+        "\n".join(ref.strip().split(".")) or "empty" for ref in references
+    ]
 
     result = ROUGE_METRIC.compute(
         predictions=formatted_preds,
@@ -214,7 +233,10 @@ def compute_rouge_scores(predictions: List[str], references: List[str]) -> Dict[
         use_stemmer=True,
         use_aggregator=True,
     )
-    return {metric: float(result[metric]) for metric in ("rouge1", "rouge2", "rougeL", "rougeLsum")}
+    return {
+        metric: float(result[metric])
+        for metric in ("rouge1", "rouge2", "rougeL", "rougeLsum")
+    }
 
 
 def evaluate_hf_subset(
@@ -251,8 +273,12 @@ def evaluate_hf_subset(
     raw = load_biolaysumm()
     dataset = raw[split]
     cols = list(dataset.features.keys())
-    input_col = next((c for c in cols if "report" in c.lower() or "source" in c.lower()), cols[0])
-    target_col = next((c for c in cols if "summary" in c.lower() or "target" in c.lower()), cols[-1])
+    input_col = next(
+        (c for c in cols if "report" in c.lower() or "source" in c.lower()), cols[0]
+    )
+    target_col = next(
+        (c for c in cols if "summary" in c.lower() or "target" in c.lower()), cols[-1]
+    )
 
     subset = dataset.select(range(min(num_samples, len(dataset))))
     predictions: List[str] = []
@@ -289,6 +315,7 @@ def evaluate_hf_subset(
 # Reporting helpers
 # ---------------------------------------------------------------------------
 
+
 def print_examples(
     predictions: List[str],
     references: List[str],
@@ -321,7 +348,9 @@ def print_examples(
         sample_idx = min(idx * step, len(predictions) - 1)
         print(f"\nExample {idx + 1} (index {sample_idx})")
         print("-" * 60)
-        print(f"\n📄 INPUT:\n{inputs[sample_idx][:400]}{'...' if len(inputs[sample_idx]) > 400 else ''}")
+        print(
+            f"\n📄 INPUT:\n{inputs[sample_idx][:400]}{'...' if len(inputs[sample_idx]) > 400 else ''}"
+        )
         print(f"\n✅ REFERENCE:\n{references[sample_idx]}")
         print(f"\n🔮 PREDICTION:\n{predictions[sample_idx]}")
         print("\n" + "-" * 60)
@@ -368,7 +397,9 @@ def save_results(
 
     report_path = output_dir / "evaluation_report.txt"
     with open(report_path, "w", encoding="utf-8") as fh:
-        fh.write("=" * 80 + "\nFLAN-T5 Radiology Summarisation Report\n" + "=" * 80 + "\n")
+        fh.write(
+            "=" * 80 + "\nFLAN-T5 Radiology Summarisation Report\n" + "=" * 80 + "\n"
+        )
         fh.write(f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         fh.write(f"Samples:   {len(predictions)}\n\n")
         fh.write("ROUGE Scores\n" + "-" * 80 + "\n")
@@ -380,7 +411,9 @@ def save_results(
         fh.write(f"Length ratio (pred/ref):   {ratio:.2f}\n")
 
 
-def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, float]) -> None:
+def append_results_to_checkpoint(
+    checkpoint_path: Path, rouge_scores: Dict[str, float]
+) -> None:
     """Append ROUGE scores to the checkpoint ``RESULTS.txt`` file.
 
     Args:
@@ -404,6 +437,7 @@ def append_results_to_checkpoint(checkpoint_path: Path, rouge_scores: Dict[str, 
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for evaluation.
 
@@ -421,7 +455,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--checkpoint", default="outputs_flan_t5_lora/best_model", help="Path to checkpoint directory."
+        "--checkpoint",
+        default="outputs_flan_t5_lora/best_model",
+        help="Path to checkpoint directory.",
     )
     parser.add_argument(
         "--device",
@@ -434,9 +470,14 @@ def parse_args() -> argparse.Namespace:
         default=data_defaults.data_dir,
         help="Directory containing train/val/test CSV files.",
     )
-    parser.add_argument("--split", default="val", help="Dataset split to evaluate (train/val/test).")
     parser.add_argument(
-        "--batch_size", type=int, default=eval_defaults.batch_size, help="Batch size for generation."
+        "--split", default="val", help="Dataset split to evaluate (train/val/test)."
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=eval_defaults.batch_size,
+        help="Batch size for generation.",
     )
     parser.add_argument(
         "--max_source_length",
@@ -457,15 +498,29 @@ def parse_args() -> argparse.Namespace:
         help="Maximum length for generation outputs.",
     )
     parser.add_argument(
-        "--num_beams", type=int, default=eval_defaults.num_beams, help="Beam search width."
+        "--num_beams",
+        type=int,
+        default=eval_defaults.num_beams,
+        help="Beam search width.",
     )
     parser.add_argument(
-        "--no_repeat_ngram_size", type=int, default=3, help="No-repeat n-gram constraint."
+        "--no_repeat_ngram_size",
+        type=int,
+        default=3,
+        help="No-repeat n-gram constraint.",
     )
     parser.add_argument(
-        "--num_examples", type=int, default=eval_defaults.num_examples, help="Number of examples to print."
+        "--num_examples",
+        type=int,
+        default=eval_defaults.num_examples,
+        help="Number of examples to print.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Optional cap on samples evaluated from CSV.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional cap on samples evaluated from CSV.",
+    )
     parser.add_argument(
         "--prefix",
         default=data_defaults.prefix,
@@ -482,7 +537,11 @@ def parse_args() -> argparse.Namespace:
         default=eval_defaults.hf_rouge_samples,
         help="If > 0, also compute ROUGE on this many Hugging Face validation samples.",
     )
-    parser.add_argument("--hf_split", default="validation", help="Hugging Face split used for optional evaluation.")
+    parser.add_argument(
+        "--hf_split",
+        default="validation",
+        help="Hugging Face split used for optional evaluation.",
+    )
     parser.add_argument(
         "--hf_prefix",
         default=data_defaults.hf_eval_prefix,
@@ -495,6 +554,7 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Entry point for evaluation and reporting.
@@ -510,7 +570,9 @@ def main() -> None:
         if choice == "auto":
             if torch.cuda.is_available():
                 return torch.device("cuda")
-            if mps_backend and mps_backend.is_available():  # pragma: no cover - requires macOS
+            if (
+                mps_backend and mps_backend.is_available()
+            ):  # pragma: no cover - requires macOS
                 return torch.device("mps")
             return torch.device("cpu")
 
@@ -532,7 +594,9 @@ def main() -> None:
     print(f"🖥️  Using {device.type.upper()} for inference.")
 
     checkpoint_path = Path(args.checkpoint)
-    output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path / "evaluation"
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else checkpoint_path / "evaluation"
+    )
 
     model, tokenizer = load_model(checkpoint_path=str(checkpoint_path), device=device)
     dataset, dataloader = prepare_csv_dataloader(
@@ -559,8 +623,10 @@ def main() -> None:
     )
     elapsed = (datetime.now() - start).total_seconds()
 
-    print(f"\n⚡ Processed {len(predictions)} samples in {elapsed:.2f}s "
-          f"({len(predictions) / elapsed if elapsed else 0:.2f} summaries/sec)")
+    print(
+        f"\n⚡ Processed {len(predictions)} samples in {elapsed:.2f}s "
+        f"({len(predictions) / elapsed if elapsed else 0:.2f} summaries/sec)"
+    )
 
     rouge_scores = compute_rouge_scores(predictions, references)
     print("\n✅ ROUGE Results:")

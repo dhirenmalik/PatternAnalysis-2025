@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# @file predict_single.py
+# @brief CLI for ad-hoc single-report summarisation with FLAN-T5 + LoRA.
+# @author Dhiren Malik (48543200)
+
 """Generate a single layperson summary using a trained FLAN-T5 checkpoint."""
 
 from __future__ import annotations
@@ -159,7 +163,9 @@ def parse_args() -> argparse.Namespace:
         help="Instruction prefix prepended to the input text.",
     )
     parser.add_argument("--max_input_len", type=int, default=hp_defaults.max_input_len)
-    parser.add_argument("--max_target_len", type=int, default=hp_defaults.max_target_len)
+    parser.add_argument(
+        "--max_target_len", type=int, default=hp_defaults.max_target_len
+    )
     parser.add_argument("--num_beams", type=int, default=eval_defaults.num_beams)
     parser.add_argument(
         "--device",
