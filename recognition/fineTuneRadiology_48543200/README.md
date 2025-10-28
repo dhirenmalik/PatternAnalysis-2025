@@ -148,7 +148,7 @@ Given the strong literature support and limited compute budget, we focused on tu
 ### Production Training Setup
 
 - **Hardware:** NVIDIA A100-SXM4-40GB (40 GB VRAM)
-- **Dataset:** Full BioLaySumm2025 training split (~30,000 samples)
+- **Dataset:** Full BioLaySumm2025 training split (~150,000 samples)
 - **Epochs:** 3
 - **Batch Size:** 4 (no gradient accumulation)
 - **Total Training Time:** 232 minutes (~3.87 hours)
@@ -190,13 +190,13 @@ Given the strong literature support and limited compute budget, we focused on tu
 - ✅ Final performance places the model in the top ~20% of BioLaySumm submissions
 
 <p align="center">
-  <img src="outputs_flan_t5_lora/loss_curve.png" alt="Training Loss" width="600"/>
+  <img src="docs/loss_curve.png" alt="Training Loss" width="600"/>
   <br/>
   <em>Figure 2: Training and validation loss curves over 3 epochs</em>
 </p>
 
 <p align="center">
-  <img src="outputs_flan_t5_lora/rouge_curves.png" alt="ROUGE Curves" width="600"/>
+  <img src="docs/rouge_curves.png" alt="ROUGE Curves" width="600"/>
   <br/>
   <em>Figure 3: ROUGE metric evolution during training</em>
 </p>
@@ -211,7 +211,7 @@ Given the strong literature support and limited compute budget, we focused on tu
 
 **Key Characteristics**:
 - **Architecture**: Encoder-decoder transformer (12 layers each)
-- **Parameters**: 247,577,856 total
+- **Parameters**: 249,347,328 total
 - **Pre-training**: 
   - C4 corpus (750GB web text)
   - Instruction tuning on 1,836 diverse NLP tasks
@@ -241,9 +241,9 @@ where:
 
 **Parameter Breakdown**:
 ```
-Total parameters:        247,577,856
+Total parameters:        249,347,328
 Trainable (LoRA only):     1,769,472  (0.71%)
-Frozen (base model):     245,808,384  (99.29%)
+Frozen (base model):     247,577,856  (99.29%)
 ```
 
 > _Figure 4:_ LoRA adapter injection into attention layers (schematic adapted from Hu et al., 2021).
@@ -262,9 +262,9 @@ Frozen (base model):     245,808,384  (99.29%)
 
 | Split | Samples | Purpose |
 |-------|---------|---------|
-| **Train** | 30,000 | Model parameter updates |
-| **Validation** | 5,000 | Hyperparameter tuning, model selection |
-| **Test** | 5,000 | **Held-out** final evaluation (never seen during training) |
+| **Train** | 150,454 | Model parameter updates |
+| **Validation** | 10,000 | Hyperparameter tuning, model selection |
+| **Test** | 10,537 | **Held-out** final evaluation (never seen during training) |
 
 #### Data Format
 
@@ -400,9 +400,9 @@ This will:
 
 **Expected output**:
 ```
-✅ Saved `train.csv` with 30,000 rows
-✅ Saved `val.csv` with 5,000 rows
-✅ Saved `test.csv` with 5,000 rows
+✅ Saved `train.csv` with 150,454 rows
+✅ Saved `val.csv` with 10,000 rows
+✅ Saved `test.csv` with 10,537 rows
 ```
 
 ---
@@ -518,13 +518,13 @@ Prediction: The chest X-ray shows fluid buildup in both lungs...
 ### Training Convergence
 
 <p align="center">
-  <img src="outputs_flan_t5_lora/batch_loss_curve.png" alt="Batch Loss" width="800"/>
+  <img src="docs/batch_loss_curve.png" alt="Batch Loss" width="800"/>
   <br/>
   <em>Figure 5: Batch-level training loss (30,000 steps)</em>
 </p>
 
 <p align="center">
-  <img src="outputs_flan_t5_lora/learning_rate_curve.png" alt="LR Schedule" width="800"/>
+  <img src="docs/learning_rate_curve.png" alt="LR Schedule" width="800"/>
   <br/>
   <em>Figure 6: Cosine learning rate schedule with 3% warmup</em>
 </p>
@@ -541,163 +541,112 @@ Prediction: The chest X-ray shows fluid buildup in both lungs...
 
 ## Example Predictions
 
-Below are representative input-output examples from the held-out test set, demonstrating the model's ability to simplify medical terminology while preserving clinical accuracy.
+Below are representative input-output examples from the held-out test set, demonstrating the model's ability to simplify medical terminology while preserving clinical accuracy. Outputs were generated with `predict.py` on `outputs_flan_t5_lora_subset/checkpoint-step-22500` (validation split, 10-sample run).
 
 ---
 
-### Example 1: Successful Simplification
-
-**Input (Radiology Report)**:
-```
-summarize for a layperson: The chest radiograph demonstrates bilateral apical pleural 
-thickening with associated parenchymal scarring. No acute cardiopulmonary process is 
-identified. The cardiac silhouette is within normal limits. No pneumothorax or pleural 
-effusion is detected.
-```
-
-**Reference (Ground Truth)**:
-```
-The chest X-ray shows thickening of the lung lining at the top of both sides with some 
-scarring in the lung tissue. There is no sign of any new heart or lung problem. The heart 
-size is normal. There is no air or fluid around the lungs.
-```
-
-**Model Prediction**:
-```
-The chest X-ray shows thickening at the top of both lungs with scarring. There is no new 
-heart or lung problem. The heart size is normal. No air or fluid is seen around the lungs.
-```
-
-**Analysis**: ✅ Excellent simplification. Model correctly translated:
-- "bilateral apical pleural thickening" → "thickening at the top of both lungs"
-- "acute cardiopulmonary process" → "new heart or lung problem"
-- "cardiac silhouette" → "heart size"
-- Preserved all key negative findings (no pneumothorax, effusion)
-
----
-
-### Example 2: Technical Term Handling
+### Severe emphysema with spinal posture finding
 
 **Input**:
 ```
-summarize for a layperson: CT abdomen reveals hepatomegaly measuring 18 cm in craniocaudal dimension. Heterogeneous enhancement pattern suggests underlying steatosis. No focal hepatic 
-lesion. Portal vein is patent.
+summarize for a layperson: The chest shows significant air trapping. Bilateral apical chronic changes are present. Dorsal kyphosis is noted. No evidence of pneumothorax.
 ```
 
 **Reference**:
 ```
-The CT scan of the belly shows an enlarged liver measuring 18 cm from top to bottom. The uneven appearance suggests fatty liver disease. There are no specific spots in the liver. 
-The main blood vessel to the liver is open and working normally.
+The chest shows a large amount of trapped air. There are long-term changes at the top of both lungs. The upper back is curved outward. There is no sign of air in the space around the lungs.
 ```
 
-**Model Prediction**:
+**Prediction**:
 ```
-The CT scan shows an enlarged liver measuring 18 cm. The pattern suggests fatty liver disease. No specific areas of concern are found in the liver. The main vein to the liver 
-is open.
+The chest x-ray shows significant trapped air. There are long-term changes at the top of both lungs. There is a humpback posture. No signs of air in the lungs are seen.
 ```
-**Analysis**: ✅ Strong performance. Model successfully:
-- Simplified "hepatomegaly" → "enlarged liver"
-- Translated "steatosis" → "fatty liver disease"
-- Converted "craniocaudal dimension" → simple measurement
-- Simplified "portal vein is patent" → "main vein to the liver is open"
-- Minor omission: "from top to bottom" descriptor lost, but clinical meaning preserved
+
+**Analysis**:
 
 ---
 
-### Example 3: Negative Findings
+### Chronic lung changes summary
 
 **Input**:
 ```
-summarize for a layperson: MRI brain with and without contrast shows no evidence of acute 
-infarction, hemorrhage, mass effect, or midline shift. Ventricles and sulci are appropriate 
-for patient age. No abnormal enhancement.
+summarize for a layperson: Chronic pulmonary changes
 ```
 
 **Reference**:
 ```
-The brain MRI scan with and without contrast dye shows no signs of stroke, bleeding, 
-swelling, or brain structure being pushed to one side. The fluid spaces in the brain are 
-normal for the patient's age. No unusual areas light up with the dye.
+Long-term changes in the lungs are seen.
 ```
 
-**Model Prediction**:
+**Prediction**:
 ```
-The brain MRI shows no signs of stroke, bleeding, swelling, or shifting of brain structures. 
-The brain spaces are normal for age. No unusual areas are seen.
+Long-term changes in the lungs are seen.
 ```
 
-**Analysis**: ✅ Good simplification with minor loss:
-- Correctly simplified all negative findings
-- "infarction" → "stroke" ✓
-- "hemorrhage" → "bleeding" ✓
-- "mass effect" → "swelling" ✓
-- "midline shift" → "shifting of brain structures" ✓
-- Slightly less detailed on ventricles/sulci but preserves essential meaning
-- Lost "with contrast dye" detail but preserved "no unusual areas" finding
+**Analysis**:
 
 ---
 
-### Example 4: Length Control Issue
+### Calcified granuloma description
 
 **Input**:
 ```
-summarize for a layperson: Abdominal ultrasound demonstrates cholelithiasis without evidence 
-of cholecystitis. Gallbladder wall measures 2 mm. No pericholecystic fluid. Common bile duct 
-measures 4 mm, within normal limits.
+summarize for a layperson: Calcified granuloma in the right lung vertex.
 ```
 
 **Reference**:
 ```
-The belly ultrasound shows stones in the gallbladder but no signs of infection or inflammation. 
-The gallbladder wall thickness is 2 mm. No fluid is seen around the gallbladder. The main bile 
-tube measures 4 mm, which is normal.
+There is a calcified granuloma located at the top of the right lung.
 ```
 
-**Model Prediction**:
+**Prediction**:
 ```
-The ultrasound shows gallstones but no infection. The gallbladder wall is 2 mm thick. No fluid 
-around the gallbladder. The bile duct is 4 mm, which is normal.
+A calcified granuloma is present in the right lung's vertex.
 ```
 
-**Analysis**: ✅ Excellent concise summary:
-- "cholelithiasis" → "gallstones" ✓
-- "cholecystitis" → "infection" ✓ (could be more specific: "gallbladder infection")
-- Preserved all measurements
-- Slightly more telegraphic style but maintains readability
-- All key findings preserved
+**Analysis**:
 
 ---
 
-### Example 5: Minor Terminology Retention
+### Cardiomegaly and COPD indications
 
 **Input**:
 ```
-summarize for a layperson: Chest CT with contrast shows a 2.3 cm subpleural nodule in the 
-right upper lobe. Morphology is spiculated with adjacent pleural tethering. Recommend 
-follow-up in 3 months or PET-CT for further characterization.
+summarize for a layperson: Cardiomegaly. Aortic elongation. Radiological signs suggestive of COPD.
 ```
 
 **Reference**:
 ```
-The chest CT scan with contrast dye shows a 2.3 cm lump under the outer lining of the right 
-upper lung. The lump has irregular spiky edges and is pulling on the lung lining. A follow-up 
-scan in 3 months or a special PET-CT scan is recommended to learn more about it.
+The heart is enlarged. The aorta, which is the main blood vessel carrying blood from the heart, is elongated. The x-ray shows signs that suggest chronic obstructive pulmonary disease (COPD), a condition that affects the lungs and makes it hard to breathe.
 ```
 
-**Model Prediction**:
+**Prediction**:
 ```
-The chest CT shows a 2.3 cm nodule in the right upper lung area. The nodule has irregular 
-edges and is attached to the lung lining. Follow-up imaging in 3 months or PET-CT scan is 
-recommended.
+The heart is enlarged. The main blood vessel leaving the heart, called the aorta, is stretched out. The x-ray shows signs that suggest chronic obstructive pulmonary disease (COPD).
 ```
 
-**Analysis**: ⚠️ Good but room for improvement:
-- Retained "nodule" (should be simplified to "lump" or "spot")
-- Simplified "spiculated" → "irregular edges" ✓
-- "pleural tethering" → "attached to the lung lining" ✓
-- Lost some detail about "spiky" appearance
-- Preserved clinical recommendation appropriately
-- Overall meaning clear but could use simpler vocabulary
+**Analysis**:
+
+---
+
+### COVID-style bilateral pneumonia concern
+
+**Input**:
+```
+summarize for a layperson: Bands of atelectasis and consolidation in the mid-lung fields, along with confluent opacities in the lower mid-lung fields, also showing bilateral involvement. Findings, considering the reported history, could correspond to COVID-19-type pneumonic infiltrates. Evaluate progression and correlate with clinical and laboratory data.
+```
+
+**Reference**:
+```
+There are areas of lung collapse and thickening in the middle parts of the lungs, along with large blurry spots in the lower middle areas, affecting both lungs. These findings, considering the patient's history, could be related to the type of lung inflammation seen in COVID-19. Further evaluation of the progression and correlation with clinical and lab data is needed.
+```
+
+**Prediction**:
+```
+There are areas of lung collapse and thickening in the middle parts of the lungs, along with cloudy areas in the lower parts of both lungs. These findings could be due to a type of lung infection called COVID-19. It's important to consider the patient's medical history and laboratory data to confirm these findings.
+```
+
+**Analysis**:
 
 ---
 
